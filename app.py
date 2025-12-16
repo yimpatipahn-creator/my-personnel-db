@@ -20,7 +20,6 @@ KEY_FILE = "credentials.json"
 def init_connection():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # รองรับทั้ง Cloud (Secrets) และ Local (File)
         try:
             if "gcp_service_account" in st.secrets:
                 creds_dict = st.secrets["gcp_service_account"]
@@ -37,10 +36,10 @@ def init_connection():
         st.stop()
 
 # ==========================================
-# 👥 ระบบจัดการผู้ใช้งาน (Users System)
+# 👥 ระบบจัดการผู้ใช้งาน (Users System) - แก้ไขปัญหาเลข 0 หาย
 # ==========================================
 def get_users_data():
-    """ดึงข้อมูลผู้ใช้งานจากชีท 'Users' ถ้าไม่มีให้สร้างใหม่"""
+    """ดึงข้อมูลผู้ใช้งานจากชีท 'Users' แบบ Text ล้วน (รักษาเลข 0 นำหน้า)"""
     client = init_connection()
     sh = client.open_by_url(SHEET_URL)
     
@@ -49,10 +48,24 @@ def get_users_data():
     except:
         worksheet = sh.add_worksheet(title="Users", rows="100", cols="3")
         worksheet.append_row(["Username", "Password", "Role"])
-        worksheet.append_row(["admin", "1234", "Admin"]) # Default Admin
+        worksheet.append_row(["admin", "1234", "Admin"])
         
-    data = worksheet.get_all_records()
-    return pd.DataFrame(data), worksheet
+    # ✅ แก้ไข: ใช้ get_all_values() แทน get_all_records() 
+    # เพื่อดึงข้อมูลดิบเป็น String ทั้งหมด (เลข 0 จะไม่หาย)
+    all_values = worksheet.get_all_values()
+    
+    if not all_values:
+        return pd.DataFrame(columns=["Username", "Password", "Role"]), worksheet
+        
+    # แถวแรกเป็น Header, ที่เหลือเป็นข้อมูล
+    headers = all_values[0]
+    data = all_values[1:]
+    
+    # สร้าง DataFrame และบังคับเป็น String ทันที
+    df = pd.DataFrame(data, columns=headers)
+    df = df.astype(str)
+    
+    return df, worksheet
 
 def sign_up(username, password, users_df, user_sheet):
     """ฟังก์ชันลงทะเบียนผู้ใช้ใหม่"""
@@ -64,8 +77,9 @@ def sign_up(username, password, users_df, user_sheet):
         st.error("ชื่อผู้ใช้งานนี้มีคนใช้แล้ว กรุณาเลือกชื่ออื่น")
         return False
         
-    # เพิ่มผู้ใช้ใหม่ลงใน Google Sheets โดยกำหนด Role เป็น User
-    user_sheet.append_row([username, password, "User"])
+    # เพิ่มข้อมูลแบบระบุว่าเป็น String (') เพื่อป้องกัน Google Sheets แปลงกลับเป็นเลข
+    user_sheet.append_row([str(username), str(password), "User"])
+    
     st.success(f"✅ ลงทะเบียนสำเร็จ! คุณ {username} ได้รับสิทธิ์ 'User' แล้ว")
     st.toast("คุณสามารถเข้าสู่ระบบได้ทันที", icon="🔑")
     return True
@@ -78,16 +92,16 @@ def check_login():
         st.session_state.role = ""
 
     if not st.session_state.logged_in:
-        # หน้าจอ Login / Sign Up
         st.markdown("""<style>.stApp {background-color: #E0F7FA;}</style>""", unsafe_allow_html=True)
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.title("🔐 เข้าสู่ระบบ / ลงทะเบียน")
             
-            # --- ดึงข้อมูลผู้ใช้มาเตรียมไว้ ---
             try:
                 users_df, user_sheet = get_users_data()
-                users_df = users_df.astype(str)
+                # ล้างช่องว่างหัวท้ายอีกครั้งเพื่อความชัวร์
+                users_df['Username'] = users_df['Username'].str.strip()
+                users_df['Password'] = users_df['Password'].str.strip()
             except Exception as e:
                 st.error(f"เกิดข้อผิดพลาดในการเชื่อมต่อข้อมูลผู้ใช้: {e}")
                 st.stop()
@@ -99,30 +113,31 @@ def check_login():
             
             with c_login:
                 if st.button("เข้าสู่ระบบ (Login)", type="primary"):
-                    user_row = users_df[users_df['Username'] == username]
+                    clean_u = username.strip()
+                    clean_p = password.strip()
                     
-                    if not user_row.empty and user_row.iloc[0]['Password'] == password:
+                    # ค้นหาข้อมูล (ตอนนี้เลข 0 จะมาครบแล้ว)
+                    user_row = users_df[users_df['Username'] == clean_u]
+                    
+                    if not user_row.empty and user_row.iloc[0]['Password'] == clean_p:
                         st.session_state.logged_in = True
-                        st.session_state.username = username
+                        st.session_state.username = clean_u
                         st.session_state.role = user_row.iloc[0]['Role']
-                        st.toast(f"ยินดีต้อนรับคุณ {username} ({st.session_state.role})", icon="🎉")
+                        st.toast(f"ยินดีต้อนรับคุณ {clean_u} ({st.session_state.role})", icon="🎉")
                         time.sleep(0.5)
                         st.rerun()
                     else:
                         st.error("❌ ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
             
             with c_signup:
-                # 📢 ปุ่มลงทะเบียน (Sign Up)
                 if st.button("ลงทะเบียน (Sign Up)"):
                     if username and password:
-                        sign_up(username, password, users_df, user_sheet)
-                        st.session_state.logged_in = False # ต้องล็อกอินซ้ำอีกครั้งหลังสมัคร
+                        sign_up(username.strip(), password.strip(), users_df, user_sheet)
+                        st.session_state.logged_in = False
                     else:
                         st.error("กรุณากรอก Username และ Password")
-        
         st.stop()
 
-# เรียก Login ก่อนเข้าโปรแกรม
 check_login()
 
 # ==========================================
@@ -147,15 +162,24 @@ add_custom_design()
 def load_data():
     try:
         client = init_connection()
-        sheet = client.open_by_url(SHEET_URL).sheet1 
-        data = sheet.get_all_records()
-        if not data: return pd.DataFrame(columns=['เลขรหัส', 'สถานะ', 'ชื่อ', 'นามสกุล', 'เงินช่วยพิเศษ', 'บำเหน็จตกทอด', 'หมายเหตุ'])
-        df = pd.DataFrame(data).astype(str)
+        sheet = client.open_by_url(SHEET_URL).sheet1
+        
+        # ใช้ get_all_values เพื่อรักษา format ของข้อมูลหลักด้วย
+        all_values = sheet.get_all_values()
+        if not all_values: return pd.DataFrame(columns=['เลขรหัส', 'สถานะ', 'ชื่อ', 'นามสกุล', 'เงินช่วยพิเศษ', 'บำเหน็จตกทอด', 'หมายเหตุ'])
+        
+        headers = all_values[0]
+        data = all_values[1:]
+        df = pd.DataFrame(data, columns=headers).astype(str)
+        
         # Cleaning
         for col in df.columns: df[col] = df[col].str.strip()
         df = df[df['เลขรหัส'] != 'เลขรหัส']
         df = df[df['เลขรหัส'] != '']
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+        # กรองคอลัมน์แปลกปลอม
+        valid_cols = [c for c in df.columns if "Unnamed" not in c and c != ""]
+        df = df[valid_cols]
+        
         return df
     except Exception as e:
         st.error(f"❌ โหลดข้อมูลไม่ได้: {e}")
@@ -165,9 +189,10 @@ def save_to_gsheet(df):
     try:
         client = init_connection()
         sheet = client.open_by_url(SHEET_URL).sheet1
-        # เรียงลำดับ
+        
         def natural_sort_key(s):
             return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', str(s))]
+        
         df['temp_sort'] = df['เลขรหัส'].apply(natural_sort_key)
         df_sorted = df.sort_values('temp_sort').drop(columns=['temp_sort'])
         
@@ -207,25 +232,18 @@ with st.sidebar:
             st.dataframe(users_df, use_container_width=True, hide_index=True)
             
             st.write("--- แก้ไขสิทธิ์ผู้ใช้งาน ---")
-            
-            # Form สำหรับแก้ไขสิทธิ์
             with st.form("edit_user_form"):
-                user_to_edit = st.selectbox("เลือก Username ที่ต้องการเปลี่ยนสิทธิ์", 
-                                            users_df['Username'].tolist())
+                user_list = users_df['Username'].tolist() if not users_df.empty else []
+                user_to_edit = st.selectbox("เลือก Username", user_list)
                 new_role = st.selectbox("เปลี่ยนสิทธิ์เป็น", ["Admin", "Editor", "User"])
                 
                 if st.form_submit_button("บันทึกการเปลี่ยนแปลงสิทธิ์"):
                     if user_to_edit:
-                        # หาแถวที่ตรงกับ Username แล้วอัปเดต Role
-                        idx_to_update = users_df[users_df['Username'] == user_to_edit].index[0]
-                        
-                        # gspread เริ่มนับที่ 1, +2 คือแถวข้อมูลแรก
-                        user_sheet.update_cell(idx_to_update + 2, 3, new_role) 
-                        st.toast(f"✅ อัปเดตสิทธิ์ {user_to_edit} เป็น {new_role} เรียบร้อยแล้ว!", icon="🔧")
+                        idx = users_df[users_df['Username'] == user_to_edit].index[0]
+                        user_sheet.update_cell(idx + 2, 3, new_role) 
+                        st.toast(f"✅ อัปเดตสิทธิ์ {user_to_edit} เรียบร้อย!", icon="🔧")
                         time.sleep(1)
                         st.rerun()
-                    else:
-                        st.error("กรุณาเลือก Username")
 
     st.divider()
     if st.button("🔄 รีโหลดข้อมูล"):
@@ -244,7 +262,7 @@ if 'df' not in st.session_state:
 df = st.session_state.df
 
 # ==========================================
-# 📑 จัดการ Tabs ตามสิทธิ์ (Role-based UI)
+# 📑 จัดการ Tabs ตามสิทธิ์
 # ==========================================
 if st.session_state.role == "User":
     tab_names = ["🔍 ค้นหาข้อมูล", "💾 ดูตารางรวม"]
@@ -254,7 +272,7 @@ else:
     tab_names = ["🔍 ค้นหาข้อมูล", "📝 บันทึกข้อมูลใหม่", "💾 ดูตารางรวม"]
     tab1, tab2, tab3 = st.tabs(tab_names)
 
-# --- Tab 1: ค้นหา (ทุกคนเห็น) ---
+# --- Tab 1: ค้นหา ---
 with tab1:
     st.subheader("🔍 ค้นหาบุคลากร")
     c1, c2, c3 = st.columns(3)
@@ -273,7 +291,7 @@ with tab1:
     else:
         st.info("พิมพ์ข้อมูลเพื่อค้นหา")
 
-# --- Tab 2: เพิ่มข้อมูล (เฉพาะ Admin/Editor) ---
+# --- Tab 2: เพิ่มข้อมูล ---
 if tab2:
     with tab2:
         st.subheader("📝 เพิ่มข้อมูลใหม่")
@@ -299,7 +317,6 @@ if tab2:
             }
             
             st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_row])], ignore_index=True)
-            
             st.toast("⏳ กำลังบันทึกข้อมูล...")
             save_to_gsheet(st.session_state.df)
             
@@ -307,7 +324,6 @@ if tab2:
                 st.session_state[key] = ""
             st.toast("✅ บันทึกเรียบร้อย!")
 
-        # Form Inputs
         col_id_input, col_id_hint = st.columns([1, 2])
         with col_id_input:
             new_id_input = st.text_input("1. เลขรหัส (จำเป็น) *", key="input_id")
@@ -337,10 +353,9 @@ if tab2:
         
         st.text_area("หมายเหตุ", key="input_note")
         st.write("---")
-        
         st.button("💾 บันทึกข้อมูล", type="primary", disabled=is_duplicate, on_click=submit_callback)
 
-# --- Tab 3: ตารางรวม (ทุกคนเห็น) ---
+# --- Tab 3: ตารางรวม ---
 with tab3:
     st.write(f"ข้อมูลทั้งหมด {len(df)} รายการ")
     st.dataframe(df, use_container_width=True)
