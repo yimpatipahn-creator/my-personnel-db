@@ -36,13 +36,62 @@ def init_connection():
         st.stop()
 
 # ==========================================
-# 👥 ระบบจัดการผู้ใช้งาน (Users System) - แก้ไขปัญหาเลข 0 หาย
+# 🎨 ระบบจัดการธีมสี (Theme Manager) - เพิ่มใหม่
+# ==========================================
+def apply_theme(theme_name):
+    # กำหนดชุดสีต่างๆ เก็บไว้ใน Dictionary
+    themes = {
+        "🌿 เขียว-ฟ้า (Green)": {
+            "bg": "#F1F8E9", "sidebar": "#E0F7FA", "sidebar_border": "#80DEEA",
+            "h1": "#2E7D32", "h1_shadow": "#A5D6A7", "h2": "#00695C",
+            "btn_grad": "linear-gradient(to right, #66BB6A, #26A69A)", "btn_shadow": "rgba(38, 166, 154, 0.3)",
+            "input_border": "#81C784", "table_border": "#80CBC4"
+        },
+        "🌸 ชมพู-ฟ้า (Pink)": {
+            "bg": "#FFF0F5", "sidebar": "#E1F5FE", "sidebar_border": "#81D4FA",
+            "h1": "#D81B60", "h1_shadow": "#F8BBD0", "h2": "#01579B",
+            "btn_grad": "linear-gradient(to right, #EC407A, #D81B60)", "btn_shadow": "rgba(233, 30, 99, 0.3)",
+            "input_border": "#F48FB1", "table_border": "#B3E5FC"
+        },
+        "🍊 ส้ม-ครีม (Orange)": {
+            "bg": "#FFF3E0", "sidebar": "#FFF8E1", "sidebar_border": "#FFE082",
+            "h1": "#E65100", "h1_shadow": "#FFCC80", "h2": "#BF360C",
+            "btn_grad": "linear-gradient(to right, #FF9800, #F57C00)", "btn_shadow": "rgba(255, 152, 0, 0.3)",
+            "input_border": "#FFB74D", "table_border": "#FFE0B2"
+        },
+        "🏢 เทา-น้ำเงิน (Professional)": {
+            "bg": "#F5F5F5", "sidebar": "#ECEFF1", "sidebar_border": "#CFD8DC",
+            "h1": "#37474F", "h1_shadow": "#B0BEC5", "h2": "#455A64",
+            "btn_grad": "linear-gradient(to right, #607D8B, #455A64)", "btn_shadow": "rgba(96, 125, 139, 0.3)",
+            "input_border": "#90A4AE", "table_border": "#CFD8DC"
+        }
+    }
+    
+    # เลือกชุดสีตามที่ส่งมา (ถ้าไม่มีให้ใช้สีเขียวเป็นค่าเริ่มต้น)
+    c = themes.get(theme_name, themes["🌿 เขียว-ฟ้า (Green)"])
+
+    st.markdown(f"""
+    <style>
+    .stApp {{ background-color: {c['bg']}; }}
+    [data-testid="stSidebar"] {{ background-color: {c['sidebar']}; border-right: 2px solid {c['sidebar_border']}; }}
+    h1 {{ color: {c['h1']} !important; text-shadow: 1px 1px 2px {c['h1_shadow']}; font-family: 'Sarabun', sans-serif; }}
+    h2, h3 {{ color: {c['h2']} !important; }}
+    .stButton>button {{
+        background: {c['btn_grad']}; color: white; border-radius: 20px;
+        border: none; padding: 10px 28px; box-shadow: 0 4px 10px {c['btn_shadow']}; font-weight: bold;
+    }}
+    .stButton>button:hover {{ transform: scale(1.05); }}
+    .stTextInput>div>div>input {{ border-radius: 12px; border: 1px solid {c['input_border']}; background-color: #FFFFFF; }}
+    [data-testid="stDataFrame"] {{ border-radius: 10px; overflow: hidden; border: 1px solid {c['table_border']}; }}
+    </style>
+    """, unsafe_allow_html=True)
+
+# ==========================================
+# 👥 ระบบจัดการผู้ใช้งาน (Users System)
 # ==========================================
 def get_users_data():
-    """ดึงข้อมูลผู้ใช้งานจากชีท 'Users' แบบ Text ล้วน (รักษาเลข 0 นำหน้า)"""
     client = init_connection()
     sh = client.open_by_url(SHEET_URL)
-    
     try:
         worksheet = sh.worksheet("Users")
     except:
@@ -50,56 +99,41 @@ def get_users_data():
         worksheet.append_row(["Username", "Password", "Role"])
         worksheet.append_row(["admin", "1234", "Admin"])
         
-    # ✅ แก้ไข: ใช้ get_all_values() แทน get_all_records() 
-    # เพื่อดึงข้อมูลดิบเป็น String ทั้งหมด (เลข 0 จะไม่หาย)
     all_values = worksheet.get_all_values()
-    
-    if not all_values:
-        return pd.DataFrame(columns=["Username", "Password", "Role"]), worksheet
-        
-    # แถวแรกเป็น Header, ที่เหลือเป็นข้อมูล
+    if not all_values: return pd.DataFrame(columns=["Username", "Password", "Role"]), worksheet
     headers = all_values[0]
     data = all_values[1:]
-    
-    # สร้าง DataFrame และบังคับเป็น String ทันที
     df = pd.DataFrame(data, columns=headers)
     df = df.astype(str)
-    
     return df, worksheet
 
 def sign_up(username, password, users_df, user_sheet):
-    """ฟังก์ชันลงทะเบียนผู้ใช้ใหม่"""
     if len(password) < 4:
         st.error("รหัสผ่านต้องมีอย่างน้อย 4 ตัวอักษร")
         return False
-        
     if username in users_df['Username'].values:
         st.error("ชื่อผู้ใช้งานนี้มีคนใช้แล้ว กรุณาเลือกชื่ออื่น")
         return False
-        
-    # เพิ่มข้อมูลแบบระบุว่าเป็น String (') เพื่อป้องกัน Google Sheets แปลงกลับเป็นเลข
     user_sheet.append_row([str(username), str(password), "User"])
-    
     st.success(f"✅ ลงทะเบียนสำเร็จ! คุณ {username} ได้รับสิทธิ์ 'User' แล้ว")
     st.toast("คุณสามารถเข้าสู่ระบบได้ทันที", icon="🔑")
     return True
 
 def check_login():
-    """ฟังก์ชันตรวจสอบรหัสผ่านและสิทธิ์"""
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
         st.session_state.username = ""
         st.session_state.role = ""
 
     if not st.session_state.logged_in:
-        st.markdown("""<style>.stApp {background-color: #E0F7FA;}</style>""", unsafe_allow_html=True)
+        # ใช้ธีม Default หน้า Login
+        apply_theme("🌿 เขียว-ฟ้า (Green)") 
+        
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.title("🔐 เข้าสู่ระบบ / ลงทะเบียน")
-            
             try:
                 users_df, user_sheet = get_users_data()
-                # ล้างช่องว่างหัวท้ายอีกครั้งเพื่อความชัวร์
                 users_df['Username'] = users_df['Username'].str.strip()
                 users_df['Password'] = users_df['Password'].str.strip()
             except Exception as e:
@@ -110,15 +144,11 @@ def check_login():
             password = st.text_input("รหัสผ่าน (Password)", type="password", key="login_p")
             
             c_login, c_signup = st.columns(2)
-            
             with c_login:
                 if st.button("เข้าสู่ระบบ (Login)", type="primary"):
                     clean_u = username.strip()
                     clean_p = password.strip()
-                    
-                    # ค้นหาข้อมูล (ตอนนี้เลข 0 จะมาครบแล้ว)
                     user_row = users_df[users_df['Username'] == clean_u]
-                    
                     if not user_row.empty and user_row.iloc[0]['Password'] == clean_p:
                         st.session_state.logged_in = True
                         st.session_state.username = clean_u
@@ -128,7 +158,6 @@ def check_login():
                         st.rerun()
                     else:
                         st.error("❌ ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
-            
             with c_signup:
                 if st.button("ลงทะเบียน (Sign Up)"):
                     if username and password:
@@ -141,45 +170,22 @@ def check_login():
 check_login()
 
 # ==========================================
-# 🎨 ธีมและการแสดงผล
-# ==========================================
-def add_custom_design():
-    st.markdown("""
-    <style>
-    .stApp { background-color: #F1F8E9; }
-    [data-testid="stSidebar"] { background-color: #E0F7FA; border-right: 2px solid #80DEEA; }
-    h1 { color: #2E7D32 !important; font-family: 'Sarabun', sans-serif; }
-    .stButton>button { background: linear-gradient(to right, #66BB6A, #26A69A); color: white; border-radius: 20px; border: none; }
-    .stButton>button:hover { transform: scale(1.05); }
-    </style>
-    """, unsafe_allow_html=True)
-
-add_custom_design()
-
-# ==========================================
 # 🛠️ ฟังก์ชันจัดการข้อมูล (Data)
 # ==========================================
 def load_data():
     try:
         client = init_connection()
         sheet = client.open_by_url(SHEET_URL).sheet1
-        
-        # ใช้ get_all_values เพื่อรักษา format ของข้อมูลหลักด้วย
         all_values = sheet.get_all_values()
         if not all_values: return pd.DataFrame(columns=['เลขรหัส', 'สถานะ', 'ชื่อ', 'นามสกุล', 'เงินช่วยพิเศษ', 'บำเหน็จตกทอด', 'หมายเหตุ'])
-        
         headers = all_values[0]
         data = all_values[1:]
         df = pd.DataFrame(data, columns=headers).astype(str)
-        
-        # Cleaning
         for col in df.columns: df[col] = df[col].str.strip()
         df = df[df['เลขรหัส'] != 'เลขรหัส']
         df = df[df['เลขรหัส'] != '']
-        # กรองคอลัมน์แปลกปลอม
         valid_cols = [c for c in df.columns if "Unnamed" not in c and c != ""]
         df = df[valid_cols]
-        
         return df
     except Exception as e:
         st.error(f"❌ โหลดข้อมูลไม่ได้: {e}")
@@ -189,13 +195,10 @@ def save_to_gsheet(df):
     try:
         client = init_connection()
         sheet = client.open_by_url(SHEET_URL).sheet1
-        
         def natural_sort_key(s):
             return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', str(s))]
-        
         df['temp_sort'] = df['เลขรหัส'].apply(natural_sort_key)
         df_sorted = df.sort_values('temp_sort').drop(columns=['temp_sort'])
-        
         sheet.clear()
         sheet.update(range_name='A1', values=[df_sorted.columns.tolist()] + df_sorted.values.tolist())
         return df_sorted
@@ -215,33 +218,38 @@ def get_last_id_in_category(df, prefix):
 # ==========================================
 # 🖥️ หน้าจอหลัก
 # ==========================================
-st.title("📂 ระบบทะเบียนคุมเลขรหัสหนังสือ")
-st.caption(f"ผู้ใช้งาน: {st.session_state.username} | สิทธิ์: {st.session_state.role}")
 
-# --- Sidebar: จัดการระบบ ---
+# --- Sidebar: ส่วนเลือกธีมและจัดการระบบ ---
 with st.sidebar:
     st.write(f"สวัสดี, **{st.session_state.username}**")
     
-    # 👑 ส่วนของ Admin เท่านั้น
+    # 🎨 ตัวเลือกธีม (ใส่ไว้ตรงนี้เพื่อความง่าย)
+    st.divider()
+    selected_theme = st.selectbox("🎨 เลือกธีมสี", 
+                                  ["🌿 เขียว-ฟ้า (Green)", 
+                                   "🌸 ชมพู-ฟ้า (Pink)", 
+                                   "🍊 ส้ม-ครีม (Orange)", 
+                                   "🏢 เทา-น้ำเงิน (Professional)"])
+    
+    apply_theme(selected_theme) # เรียกใช้ธีมทันทีที่เลือก
+
+    # 👑 ส่วนของ Admin
     if st.session_state.role == "Admin":
         st.divider()
-        st.subheader("👑 ผู้ดูแลระบบ (Admin)")
-        
+        st.subheader("👑 ผู้ดูแลระบบ")
         with st.expander("จัดการผู้ใช้งาน"):
             users_df, user_sheet = get_users_data()
             st.dataframe(users_df, use_container_width=True, hide_index=True)
-            
-            st.write("--- แก้ไขสิทธิ์ผู้ใช้งาน ---")
+            st.write("--- แก้ไขสิทธิ์ ---")
             with st.form("edit_user_form"):
                 user_list = users_df['Username'].tolist() if not users_df.empty else []
                 user_to_edit = st.selectbox("เลือก Username", user_list)
-                new_role = st.selectbox("เปลี่ยนสิทธิ์เป็น", ["Admin", "Editor", "User"])
-                
-                if st.form_submit_button("บันทึกการเปลี่ยนแปลงสิทธิ์"):
+                new_role = st.selectbox("เปลี่ยนสิทธิ์", ["Admin", "Editor", "User"])
+                if st.form_submit_button("บันทึก"):
                     if user_to_edit:
                         idx = users_df[users_df['Username'] == user_to_edit].index[0]
                         user_sheet.update_cell(idx + 2, 3, new_role) 
-                        st.toast(f"✅ อัปเดตสิทธิ์ {user_to_edit} เรียบร้อย!", icon="🔧")
+                        st.toast("✅ เรียบร้อย!", icon="🔧")
                         time.sleep(1)
                         st.rerun()
 
@@ -250,20 +258,21 @@ with st.sidebar:
         st.cache_data.clear()
         st.session_state.df = load_data()
         st.rerun()
-        
     if st.button("🚪 ออกจากระบบ"):
         st.session_state.logged_in = False
         st.rerun()
 
-# --- โหลดข้อมูล ---
+# --- ส่วนแสดงผลหลัก ---
+st.title("📂 ระบบทะเบียนคุมเลขรหัสหนังสือ")
+st.caption(f"ผู้ใช้งาน: {st.session_state.username} | สิทธิ์: {st.session_state.role}")
+
+# โหลดข้อมูล
 if 'df' not in st.session_state:
     with st.spinner("กำลังโหลดข้อมูล..."):
         st.session_state.df = load_data()
 df = st.session_state.df
 
-# ==========================================
-# 📑 จัดการ Tabs ตามสิทธิ์
-# ==========================================
+# จัดการ Tabs
 if st.session_state.role == "User":
     tab_names = ["🔍 ค้นหาข้อมูล", "💾 ดูตารางรวม"]
     tab1, tab3 = st.tabs(tab_names)
@@ -272,30 +281,27 @@ else:
     tab_names = ["🔍 ค้นหาข้อมูล", "📝 บันทึกข้อมูลใหม่", "💾 ดูตารางรวม"]
     tab1, tab2, tab3 = st.tabs(tab_names)
 
-# --- Tab 1: ค้นหา ---
+# Tab 1: ค้นหา
 with tab1:
     st.subheader("🔍 ค้นหาบุคลากร")
     c1, c2, c3 = st.columns(3)
     with c1: search_id = st.text_input("เลขรหัส", placeholder="เช่น ก.1").strip()
     with c2: search_name = st.text_input("ชื่อ", placeholder="พิมพ์ชื่อ...").strip()
     with c3: search_surname = st.text_input("นามสกุล", placeholder="พิมพ์นามสกุล...").strip()
-    
     results = df.copy()
     if search_id: results = results[results['เลขรหัส'].str.contains(search_id, na=False)]
     if search_name: results = results[results['ชื่อ'].str.contains(search_name, na=False)]
     if search_surname: results = results[results['นามสกุล'].str.contains(search_surname, na=False)]
-    
     if len(results) < len(df):
         st.success(f"พบ {len(results)} รายการ")
         st.dataframe(results, use_container_width=True, hide_index=True)
     else:
         st.info("พิมพ์ข้อมูลเพื่อค้นหา")
 
-# --- Tab 2: เพิ่มข้อมูล ---
+# Tab 2: เพิ่มข้อมูล
 if tab2:
     with tab2:
         st.subheader("📝 เพิ่มข้อมูลใหม่")
-        
         def submit_callback():
             new_id = st.session_state.input_id
             new_name = st.session_state.input_name
@@ -304,30 +310,18 @@ if tab2:
             new_special = st.session_state.input_special
             new_pension = st.session_state.input_pension
             new_note = st.session_state.input_note
-            
             if not (new_id and new_name and new_surname and new_status):
                 st.toast("❌ กรุณากรอกข้อมูลช่องที่มี * ให้ครบ")
                 return
-
-            new_row = {
-                'เลขรหัส': new_id, 'สถานะ': new_status, 
-                'ชื่อ': new_name, 'นามสกุล': new_surname, 
-                'เงินช่วยพิเศษ': new_special, 'บำเหน็จตกทอด': new_pension, 
-                'หมายเหตุ': new_note
-            }
-            
+            new_row = {'เลขรหัส': new_id, 'สถานะ': new_status, 'ชื่อ': new_name, 'นามสกุล': new_surname, 'เงินช่วยพิเศษ': new_special, 'บำเหน็จตกทอด': new_pension, 'หมายเหตุ': new_note}
             st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_row])], ignore_index=True)
             st.toast("⏳ กำลังบันทึกข้อมูล...")
             save_to_gsheet(st.session_state.df)
-            
-            for key in ['input_id', 'input_name', 'input_surname', 'input_status', 'input_note']:
-                st.session_state[key] = ""
+            for key in ['input_id', 'input_name', 'input_surname', 'input_status', 'input_note']: st.session_state[key] = ""
             st.toast("✅ บันทึกเรียบร้อย!")
 
         col_id_input, col_id_hint = st.columns([1, 2])
-        with col_id_input:
-            new_id_input = st.text_input("1. เลขรหัส (จำเป็น) *", key="input_id")
-        
+        with col_id_input: new_id_input = st.text_input("1. เลขรหัส (จำเป็น) *", key="input_id")
         is_duplicate = False
         with col_id_hint:
             if new_id_input:
@@ -345,17 +339,15 @@ if tab2:
         c1, c2 = st.columns(2)
         with c1: st.text_input("2. ชื่อ (จำเป็น) *", key="input_name")
         with c2: st.text_input("3. นามสกุล (จำเป็น) *", key="input_surname")
-        
         c1, c2, c3 = st.columns(3)
         with c1: st.selectbox("4. สถานะ *", ["", "ขรก.", "ลจ."], key="input_status")
         with c2: st.selectbox("เงินช่วยพิเศษ", ["มี", "ไม่มี", "-"], key="input_special")
         with c3: st.selectbox("บำเหน็จตกทอด", ["มี", "ไม่มี", "-"], key="input_pension")
-        
         st.text_area("หมายเหตุ", key="input_note")
         st.write("---")
         st.button("💾 บันทึกข้อมูล", type="primary", disabled=is_duplicate, on_click=submit_callback)
 
-# --- Tab 3: ตารางรวม ---
+# Tab 3: ตารางรวม
 with tab3:
     st.write(f"ข้อมูลทั้งหมด {len(df)} รายการ")
     st.dataframe(df, use_container_width=True)
