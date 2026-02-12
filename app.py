@@ -36,10 +36,9 @@ def init_connection():
         st.stop()
 
 # ==========================================
-# 🎨 ระบบจัดการธีมสี (Theme Manager) - เพิ่มใหม่
+# 🎨 ระบบจัดการธีมสี (Theme Manager) - แก้ไข Font สีดำ
 # ==========================================
 def apply_theme(theme_name):
-    # กำหนดชุดสีต่างๆ เก็บไว้ใน Dictionary
     themes = {
         "🌿 เขียว-ฟ้า (Green)": {
             "bg": "#F1F8E9", "sidebar": "#E0F7FA", "sidebar_border": "#80DEEA",
@@ -67,21 +66,55 @@ def apply_theme(theme_name):
         }
     }
     
-    # เลือกชุดสีตามที่ส่งมา (ถ้าไม่มีให้ใช้สีเขียวเป็นค่าเริ่มต้น)
     c = themes.get(theme_name, themes["🌿 เขียว-ฟ้า (Green)"])
 
     st.markdown(f"""
     <style>
+    /* บังคับพื้นหลัง */
     .stApp {{ background-color: {c['bg']}; }}
+    
+    /* Sidebar */
     [data-testid="stSidebar"] {{ background-color: {c['sidebar']}; border-right: 2px solid {c['sidebar_border']}; }}
+    
+    /* หัวข้อ */
     h1 {{ color: {c['h1']} !important; text-shadow: 1px 1px 2px {c['h1_shadow']}; font-family: 'Sarabun', sans-serif; }}
-    h2, h3 {{ color: {c['h2']} !important; }}
+    h2, h3, h4, h5, h6, label, .stMarkdown p {{ color: {c['h2']} !important; }}
+    
+    /* ปุ่ม */
     .stButton>button {{
         background: {c['btn_grad']}; color: white; border-radius: 20px;
         border: none; padding: 10px 28px; box-shadow: 0 4px 10px {c['btn_shadow']}; font-weight: bold;
     }}
     .stButton>button:hover {{ transform: scale(1.05); }}
-    .stTextInput>div>div>input {{ border-radius: 12px; border: 1px solid {c['input_border']}; background-color: #FFFFFF; }}
+    
+    /* ✅ แก้ไข: บังคับให้ช่องกรอกข้อมูลมีตัวหนังสือสีดำเสมอ (แก้ปัญหา Dark Mode) */
+    .stTextInput>div>div>input {{ 
+        border-radius: 12px; 
+        border: 1px solid {c['input_border']}; 
+        background-color: #FFFFFF !important; 
+        color: #000000 !important; /* บังคับดำ */
+        -webkit-text-fill-color: #000000 !important;
+        caret-color: #000000 !important; /* Cursor สีดำ */
+    }}
+    
+    /* แก้ไข Text Area */
+    .stTextArea>div>div>textarea {{
+        border-radius: 12px; 
+        border: 1px solid {c['input_border']}; 
+        background-color: #FFFFFF !important; 
+        color: #000000 !important;
+        -webkit-text-fill-color: #000000 !important;
+    }}
+    
+    /* แก้ไข Selectbox */
+    div[data-baseweb="select"] > div {{
+        border-radius: 12px;
+        border: 1px solid {c['input_border']};
+        background-color: #FFFFFF !important;
+        color: #000000 !important;
+    }}
+    
+    /* ตาราง */
     [data-testid="stDataFrame"] {{ border-radius: 10px; overflow: hidden; border: 1px solid {c['table_border']}; }}
     </style>
     """, unsafe_allow_html=True)
@@ -126,7 +159,6 @@ def check_login():
         st.session_state.role = ""
 
     if not st.session_state.logged_in:
-        # ใช้ธีม Default หน้า Login
         apply_theme("🌿 เขียว-ฟ้า (Green)") 
         
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -219,11 +251,9 @@ def get_last_id_in_category(df, prefix):
 # 🖥️ หน้าจอหลัก
 # ==========================================
 
-# --- Sidebar: ส่วนเลือกธีมและจัดการระบบ ---
 with st.sidebar:
     st.write(f"สวัสดี, **{st.session_state.username}**")
     
-    # 🎨 ตัวเลือกธีม (ใส่ไว้ตรงนี้เพื่อความง่าย)
     st.divider()
     selected_theme = st.selectbox("🎨 เลือกธีมสี", 
                                   ["🌿 เขียว-ฟ้า (Green)", 
@@ -231,9 +261,8 @@ with st.sidebar:
                                    "🍊 ส้ม-ครีม (Orange)", 
                                    "🏢 เทา-น้ำเงิน (Professional)"])
     
-    apply_theme(selected_theme) # เรียกใช้ธีมทันทีที่เลือก
+    apply_theme(selected_theme)
 
-    # 👑 ส่วนของ Admin
     if st.session_state.role == "Admin":
         st.divider()
         st.subheader("👑 ผู้ดูแลระบบ")
@@ -262,17 +291,14 @@ with st.sidebar:
         st.session_state.logged_in = False
         st.rerun()
 
-# --- ส่วนแสดงผลหลัก ---
 st.title("📂 ระบบทะเบียนคุมเลขรหัสหนังสือ")
 st.caption(f"ผู้ใช้งาน: {st.session_state.username} | สิทธิ์: {st.session_state.role}")
 
-# โหลดข้อมูล
 if 'df' not in st.session_state:
     with st.spinner("กำลังโหลดข้อมูล..."):
         st.session_state.df = load_data()
 df = st.session_state.df
 
-# จัดการ Tabs
 if st.session_state.role == "User":
     tab_names = ["🔍 ค้นหาข้อมูล", "💾 ดูตารางรวม"]
     tab1, tab3 = st.tabs(tab_names)
@@ -281,7 +307,6 @@ else:
     tab_names = ["🔍 ค้นหาข้อมูล", "📝 บันทึกข้อมูลใหม่", "💾 ดูตารางรวม"]
     tab1, tab2, tab3 = st.tabs(tab_names)
 
-# Tab 1: ค้นหา
 with tab1:
     st.subheader("🔍 ค้นหาบุคลากร")
     c1, c2, c3 = st.columns(3)
@@ -298,7 +323,6 @@ with tab1:
     else:
         st.info("พิมพ์ข้อมูลเพื่อค้นหา")
 
-# Tab 2: เพิ่มข้อมูล
 if tab2:
     with tab2:
         st.subheader("📝 เพิ่มข้อมูลใหม่")
@@ -347,7 +371,6 @@ if tab2:
         st.write("---")
         st.button("💾 บันทึกข้อมูล", type="primary", disabled=is_duplicate, on_click=submit_callback)
 
-# Tab 3: ตารางรวม
 with tab3:
     st.write(f"ข้อมูลทั้งหมด {len(df)} รายการ")
     st.dataframe(df, use_container_width=True)
