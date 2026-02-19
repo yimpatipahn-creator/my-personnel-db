@@ -172,31 +172,43 @@ def check_login():
                 st.error(f"เกิดข้อผิดพลาดในการเชื่อมต่อข้อมูลผู้ใช้: {e}")
                 st.stop()
             
-            username = st.text_input("ชื่อผู้ใช้งาน (Username)", key="login_u")
-            password = st.text_input("รหัสผ่าน (Password)", type="password", key="login_p")
-            
-            c_login, c_signup = st.columns(2)
-            with c_login:
-                if st.button("เข้าสู่ระบบ (Login)", type="primary"):
-                    clean_u = username.strip()
-                    clean_p = password.strip()
-                    user_row = users_df[users_df['Username'] == clean_u]
-                    if not user_row.empty and user_row.iloc[0]['Password'] == clean_p:
-                        st.session_state.logged_in = True
-                        st.session_state.username = clean_u
-                        st.session_state.role = user_row.iloc[0]['Role']
-                        st.toast(f"ยินดีต้อนรับคุณ {clean_u} ({st.session_state.role})", icon="🎉")
-                        time.sleep(0.5)
-                        st.rerun()
-                    else:
-                        st.error("❌ ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
-            with c_signup:
-                if st.button("ลงทะเบียน (Sign Up)"):
-                    if username and password:
-                        sign_up(username.strip(), password.strip(), users_df, user_sheet)
-                        st.session_state.logged_in = False
-                    else:
-                        st.error("กรุณากรอก Username และ Password")
+            # ---------------------------------------------------------
+            # ✅ แก้ไข: ใช้ st.form เพื่อแก้ปัญหา Chrome Autofill (ผีหลอก)
+            # ---------------------------------------------------------
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("ชื่อผู้ใช้งาน (Username)", key="login_u")
+                password = st.text_input("รหัสผ่าน (Password)", type="password", key="login_p")
+                
+                c_login, c_signup = st.columns(2)
+                with c_login:
+                    # ปุ่มใน form ต้องใช้ st.form_submit_button
+                    submit_login = st.form_submit_button("เข้าสู่ระบบ (Login)", type="primary")
+                with c_signup:
+                    submit_signup = st.form_submit_button("ลงทะเบียน (Sign Up)")
+
+            # --- จัดการเมื่อกดปุ่ม Login ---
+            if submit_login:
+                clean_u = username.strip()
+                clean_p = password.strip()
+                user_row = users_df[users_df['Username'] == clean_u]
+                if not user_row.empty and user_row.iloc[0]['Password'] == clean_p:
+                    st.session_state.logged_in = True
+                    st.session_state.username = clean_u
+                    st.session_state.role = user_row.iloc[0]['Role']
+                    st.toast(f"ยินดีต้อนรับคุณ {clean_u} ({st.session_state.role})", icon="🎉")
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error("❌ ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
+                    
+            # --- จัดการเมื่อกดปุ่ม Sign Up ---
+            elif submit_signup:
+                if username and password:
+                    sign_up(username.strip(), password.strip(), users_df, user_sheet)
+                    st.session_state.logged_in = False
+                else:
+                    st.error("กรุณากรอก Username และ Password ก่อนลงทะเบียน")
+                    
         st.stop()
 
 check_login()
