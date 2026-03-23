@@ -68,7 +68,7 @@ def apply_theme(theme_name):
     
     c = themes.get(theme_name, themes["🌿 เขียว-ฟ้า (Green)"])
 
-    st.markdown(f"""
+st.markdown(f"""
     <style>
     /* บังคับพื้นหลัง */
     .stApp {{ background-color: {c['bg']}; }}
@@ -79,6 +79,26 @@ def apply_theme(theme_name):
     /* หัวข้อ */
     h1 {{ color: {c['h1']} !important; text-shadow: 1px 1px 2px {c['h1_shadow']}; font-family: 'Sarabun', sans-serif; }}
     h2, h3, h4, h5, h6, label, .stMarkdown p {{ color: {c['h2']} !important; }}
+    
+    /* ========================================= */
+    /* ✅ เพิ่มส่วนนี้: แก้ไขสีตัวหนังสือของ Tabs */
+    /* ========================================= */
+    button[data-baseweb="tab"] p {{
+        color: #4B5563 !important; /* บังคับให้แท็บที่ไม่ได้เลือกเป็นสีเทาเข้มเสมอ */
+        font-size: 16px !important;
+        font-weight: 500 !important;
+    }}
+    
+    button[data-baseweb="tab"][aria-selected="true"] p {{
+        color: {c['h1']} !important; /* แท็บที่ถูกเลือก ให้ใช้สีหลักของแต่ละธีม */
+        font-weight: bold !important;
+    }}
+    
+    /* เปลี่ยนสีเส้นใต้ Tab เวลากดเลือก */
+    div[data-baseweb="tab-highlight"] {{
+        background-color: {c['h1']} !important;
+    }}
+    /* ========================================= */
     
     /* ปุ่ม */
     .stButton>button {{
