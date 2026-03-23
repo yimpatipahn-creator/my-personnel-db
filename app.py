@@ -331,7 +331,7 @@ with tab1:
     if search_surname: results = results[results['นามสกุล'].str.contains(search_surname, na=False)]
     if len(results) < len(df):
         st.success(f"พบ {len(results)} รายการ")
-        results_display = results.fillna("").astype(str)
+        results_display = results.drop(columns=['temp_sort'], errors='ignore').fillna("").astype(str)
         st.dataframe(results_display, use_container_width=True, hide_index=True)
     else:
         st.info("พิมพ์ข้อมูลเพื่อค้นหา")
@@ -386,7 +386,5 @@ if tab2:
 
 with tab3:
     st.write(f"ข้อมูลทั้งหมด {len(df)} รายการ")
-    # ป้องกัน pyarrow error โดยบังคับให้ข้อมูลว่างเปล่ากลายเป็น "" และเป็น String ก่อนแสดงผล
-    df_display = df.copy()
-    df_display = df_display.fillna("").astype(str)
+    df_display = df.drop(columns=['temp_sort'], errors='ignore').fillna("").astype(str)
     st.dataframe(df_display, use_container_width=True)
