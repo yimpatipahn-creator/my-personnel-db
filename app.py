@@ -390,4 +390,4 @@ df_display = df.fillna("")
         # 2. บังคับให้ข้อมูลทุกคอลัมน์เป็นข้อความ (String) เพื่อป้องกัน PyArrow Error
 df_display = df_display.astype(str) 
         # 3. ค่อยสั่งแสดงตาราง
- st.dataframe(df_display, use_container_width=True)
+st.dataframe(df_display, use_container_width=True)
