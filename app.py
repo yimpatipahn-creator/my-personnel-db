@@ -386,8 +386,8 @@ if tab2:
 with tab3:
     st.write(f"ข้อมูลทั้งหมด {len(df)} รายการ")
     # 1. จัดการค่าว่าง (NaN, None) ให้กลายเป็นข้อความว่างๆ ก่อน
-                   df_display = df.fillna("") 
+df_display = df.fillna("") 
         # 2. บังคับให้ข้อมูลทุกคอลัมน์เป็นข้อความ (String) เพื่อป้องกัน PyArrow Error
-                  df_display = df_display.astype(str) 
+df_display = df_display.astype(str) 
         # 3. ค่อยสั่งแสดงตาราง
-                  st.dataframe(df_display, use_container_width=True)
+ st.dataframe(df_display, use_container_width=True)
