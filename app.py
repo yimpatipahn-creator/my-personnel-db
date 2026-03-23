@@ -38,6 +38,9 @@ def init_connection():
 # ==========================================
 # 🎨 ระบบจัดการธีมสี (Theme Manager) - แก้ไข Font สีดำ
 # ==========================================
+# ==========================================
+# 🎨 ระบบจัดการธีมสี (Theme Manager)
+# ==========================================
 def apply_theme(theme_name):
     themes = {
         "🌿 เขียว-ฟ้า (Green)": {
@@ -68,7 +71,7 @@ def apply_theme(theme_name):
     
     c = themes.get(theme_name, themes["🌿 เขียว-ฟ้า (Green)"])
 
-st.markdown(f"""
+    st.markdown(f"""
     <style>
     /* บังคับพื้นหลัง */
     .stApp {{ background-color: {c['bg']}; }}
@@ -81,20 +84,19 @@ st.markdown(f"""
     h2, h3, h4, h5, h6, label, .stMarkdown p {{ color: {c['h2']} !important; }}
     
     /* ========================================= */
-    /* ✅ เพิ่มส่วนนี้: แก้ไขสีตัวหนังสือของ Tabs */
+    /* ✅ แก้ไขสีตัวหนังสือของ Tabs ให้มองเห็นชัดขึ้น */
     /* ========================================= */
     button[data-baseweb="tab"] p {{
-        color: #4B5563 !important; /* บังคับให้แท็บที่ไม่ได้เลือกเป็นสีเทาเข้มเสมอ */
+        color: #4B5563 !important; /* สีเทาเข้มสำหรับแท็บที่ไม่ได้เลือก */
         font-size: 16px !important;
         font-weight: 500 !important;
     }}
     
     button[data-baseweb="tab"][aria-selected="true"] p {{
-        color: {c['h1']} !important; /* แท็บที่ถูกเลือก ให้ใช้สีหลักของแต่ละธีม */
+        color: {c['h1']} !important; /* สีหลักของธีมสำหรับแท็บที่เลือกอยู่ */
         font-weight: bold !important;
     }}
     
-    /* เปลี่ยนสีเส้นใต้ Tab เวลากดเลือก */
     div[data-baseweb="tab-highlight"] {{
         background-color: {c['h1']} !important;
     }}
@@ -107,14 +109,14 @@ st.markdown(f"""
     }}
     .stButton>button:hover {{ transform: scale(1.05); }}
     
-    /* ✅ แก้ไข: บังคับให้ช่องกรอกข้อมูลมีตัวหนังสือสีดำเสมอ (แก้ปัญหา Dark Mode) */
+    /* บังคับให้ช่องกรอกข้อมูลมีตัวหนังสือสีดำเสมอ */
     .stTextInput>div>div>input {{ 
         border-radius: 12px; 
         border: 1px solid {c['input_border']}; 
         background-color: #FFFFFF !important; 
-        color: #000000 !important; /* บังคับดำ */
+        color: #000000 !important; 
         -webkit-text-fill-color: #000000 !important;
-        caret-color: #000000 !important; /* Cursor สีดำ */
+        caret-color: #000000 !important; 
     }}
     
     /* แก้ไข Text Area */
