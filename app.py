@@ -385,4 +385,7 @@ if tab2:
 
 with tab3:
     st.write(f"ข้อมูลทั้งหมด {len(df)} รายการ")
-    st.dataframe(df, use_container_width=True)
+    # ป้องกัน pyarrow error โดยบังคับให้ข้อมูลว่างเปล่ากลายเป็น "" และเป็น String ก่อนแสดงผล
+    df_display = df.copy()
+    df_display = df_display.fillna("").astype(str)
+    st.dataframe(df_display, use_container_width=True)
