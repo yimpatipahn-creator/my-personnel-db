@@ -36,36 +36,37 @@ def init_connection():
         st.stop()
 
 # ==========================================
-# 🎨 ระบบจัดการธีมสี (Theme Manager) - แก้ไข Font สีดำ
-# ==========================================
-# ==========================================
-# 🎨 ระบบจัดการธีมสี (Theme Manager)
+# 🎨 ระบบจัดการธีมสี (Theme Manager) - แก้ไขตัวหนังสือกลืน 100%
 # ==========================================
 def apply_theme(theme_name):
     themes = {
         "🌿 เขียว-ฟ้า (Green)": {
-            "bg": "#F1F8E9", "sidebar": "#E0F7FA", "sidebar_border": "#80DEEA",
-            "h1": "#2E7D32", "h1_shadow": "#A5D6A7", "h2": "#00695C",
-            "btn_grad": "linear-gradient(to right, #66BB6A, #26A69A)", "btn_shadow": "rgba(38, 166, 154, 0.3)",
-            "input_border": "#81C784", "table_border": "#80CBC4"
+            "bg": "#F4F9F4", "sidebar": "#E8F5E9", "sidebar_border": "#A5D6A7",
+            "h1": "#1B5E20", "h1_shadow": "#C8E6C9", "h2": "#2E7D32",
+            "tab_active": "#1B5E20",
+            "btn_grad": "linear-gradient(to right, #43A047, #1E88E5)", "btn_shadow": "rgba(30, 136, 229, 0.3)",
+            "input_border": "#81C784", "table_border": "#A5D6A7"
         },
         "🌸 ชมพู-ฟ้า (Pink)": {
-            "bg": "#FFF0F5", "sidebar": "#E1F5FE", "sidebar_border": "#81D4FA",
-            "h1": "#D81B60", "h1_shadow": "#F8BBD0", "h2": "#01579B",
-            "btn_grad": "linear-gradient(to right, #EC407A, #D81B60)", "btn_shadow": "rgba(233, 30, 99, 0.3)",
-            "input_border": "#F48FB1", "table_border": "#B3E5FC"
+            "bg": "#FDF2F4", "sidebar": "#FCE4EC", "sidebar_border": "#F48FB1",
+            "h1": "#AD1457", "h1_shadow": "#F8BBD0", "h2": "#C2185B",
+            "tab_active": "#AD1457",
+            "btn_grad": "linear-gradient(to right, #D81B60, #8E24AA)", "btn_shadow": "rgba(216, 27, 96, 0.3)",
+            "input_border": "#F48FB1", "table_border": "#F8BBD0"
         },
         "🍊 ส้ม-ครีม (Orange)": {
-            "bg": "#FFF3E0", "sidebar": "#FFF8E1", "sidebar_border": "#FFE082",
-            "h1": "#E65100", "h1_shadow": "#FFCC80", "h2": "#BF360C",
-            "btn_grad": "linear-gradient(to right, #FF9800, #F57C00)", "btn_shadow": "rgba(255, 152, 0, 0.3)",
+            "bg": "#FFF8F0", "sidebar": "#FFF3E0", "sidebar_border": "#FFCC80",
+            "h1": "#BF360C", "h1_shadow": "#FFE0B2", "h2": "#D84315",
+            "tab_active": "#BF360C",
+            "btn_grad": "linear-gradient(to right, #FB8C00, #F4511E)", "btn_shadow": "rgba(244, 81, 30, 0.3)",
             "input_border": "#FFB74D", "table_border": "#FFE0B2"
         },
         "🏢 เทา-น้ำเงิน (Professional)": {
-            "bg": "#F5F5F5", "sidebar": "#ECEFF1", "sidebar_border": "#CFD8DC",
-            "h1": "#37474F", "h1_shadow": "#B0BEC5", "h2": "#455A64",
-            "btn_grad": "linear-gradient(to right, #607D8B, #455A64)", "btn_shadow": "rgba(96, 125, 139, 0.3)",
-            "input_border": "#90A4AE", "table_border": "#CFD8DC"
+            "bg": "#F8FAFC", "sidebar": "#EDF2F7", "sidebar_border": "#CBD5E1",
+            "h1": "#0F172A", "h1_shadow": "#E2E8F0", "h2": "#1E293B",
+            "tab_active": "#0F172A",
+            "btn_grad": "linear-gradient(to right, #334155, #475569)", "btn_shadow": "rgba(51, 65, 85, 0.3)",
+            "input_border": "#94A3B8", "table_border": "#CBD5E1"
         }
     }
     
@@ -73,71 +74,120 @@ def apply_theme(theme_name):
 
     st.markdown(f"""
     <style>
-    /* บังคับพื้นหลัง */
-    .stApp {{ background-color: {c['bg']}; }}
+    /* 1. บังคับพื้นหลังและตัวหนังสือหลักของหน้าจอ */
+    .stApp {{ 
+        background-color: {c['bg']} !important; 
+        color: #111827 !important; 
+    }}
     
-    /* Sidebar */
-    [data-testid="stSidebar"] {{ background-color: {c['sidebar']}; border-right: 2px solid {c['sidebar_border']}; }}
+    /* 2. Sidebar และส่วนประกอบด้านซ้ายทั้งหมด */
+    [data-testid="stSidebar"] {{ 
+        background-color: {c['sidebar']} !important; 
+        border-right: 2px solid {c['sidebar_border']}; 
+    }}
+    [data-testid="stSidebar"] p, 
+    [data-testid="stSidebar"] span, 
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {{
+        color: #111827 !important;
+    }}
     
-    /* หัวข้อ */
-    h1 {{ color: {c['h1']} !important; text-shadow: 1px 1px 2px {c['h1_shadow']}; font-family: 'Sarabun', sans-serif; }}
-    h2, h3, h4, h5, h6, label, .stMarkdown p {{ color: {c['h2']} !important; }}
+    /* แก้ไขข้อความใน Expander "จัดการผู้ใช้งาน" ที่มองไม่เห็น */
+    [data-testid="stExpander"] details summary,
+    [data-testid="stExpander"] details summary * {{
+        color: #111827 !important;
+        font-weight: 600 !important;
+    }}
     
-    /* ========================================= */
-    /* ✅ แก้ไขสีตัวหนังสือของ Tabs ให้มองเห็นชัดขึ้น */
-    /* ========================================= */
-    button[data-baseweb="tab"] p {{
-        color: #4B5563 !important; /* สีเทาเข้มสำหรับแท็บที่ไม่ได้เลือก */
+    /* 3. แก้ไขแถบเมนูแท็บ (Tabs) ที่ตัวหนังสือสีขาว/กลืน */
+    div[data-baseweb="tab-list"] button {{
+        background: transparent !important;
+    }}
+    /* แท็บทั่วไปที่ไม่ได้คลิกเลือก (ให้เป็นสีเทาเข้ม ชัดเจนแน่นอน) */
+    div[data-baseweb="tab-list"] button * {{
+        color: #374151 !important;
+        -webkit-text-fill-color: #374151 !important;
         font-size: 16px !important;
+        font-weight: 600 !important;
+    }}
+    /* แท็บที่กำลังเลือกอยู่ (Active) */
+    div[data-baseweb="tab-list"] button[aria-selected="true"] * {{
+        color: {c['tab_active']} !important;
+        -webkit-text-fill-color: {c['tab_active']} !important;
+        font-weight: 800 !important;
+    }}
+    /* เส้นขีดใต้แท็บ */
+    div[data-baseweb="tab-highlight"] {{
+        background-color: {c['tab_active']} !important;
+        height: 3px !important;
+    }}
+
+    /* 4. แก้ไขกล่อง Dropdown Selectbox ที่พื้นหลังดำจนมองไม่เห็น */
+    div[data-baseweb="select"] > div {{
+        background-color: #FFFFFF !important;
+        border-radius: 10px !important;
+        border: 1.5px solid {c['input_border']} !important;
+    }}
+    div[data-baseweb="select"] * {{
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }}
+    /* เมนูตัวเลือกด้านใน dropdown เมื่อคลิกเปิด */
+    ul[data-baseweb="menu"] {{
+        background-color: #FFFFFF !important;
+    }}
+    ul[data-baseweb="menu"] li * {{
+        color: #111827 !important;
+    }}
+
+    /* 5. หัวข้อขนาดต่าง ๆ */
+    h1 {{ 
+        color: {c['h1']} !important; 
+        text-shadow: 1px 1px 2px {c['h1_shadow']}; 
+        font-family: 'Sarabun', sans-serif; 
+    }}
+    h2, h3, h4, h5, h6 {{ 
+        color: {c['h2']} !important; 
+        font-weight: 700 !important;
+    }}
+
+    /* 6. ตัวหนังสือทั่วไป ป้ายข้อความ และคำอธิบาย */
+    p, span, label, [data-testid="stWidgetLabel"] p {{ 
+        color: #111827 !important; 
+        -webkit-text-fill-color: #111827 !important;
         font-weight: 500 !important;
     }}
     
-    button[data-baseweb="tab"][aria-selected="true"] p {{
-        color: {c['h1']} !important; /* สีหลักของธีมสำหรับแท็บที่เลือกอยู่ */
+    /* 7. ปุ่มกด */
+    .stButton>button {{
+        background: {c['btn_grad']} !important; 
+        border-radius: 20px !important;
+        border: none !important; 
+        padding: 8px 24px !important; 
+        box-shadow: 0 4px 10px {c['btn_shadow']} !important; 
+    }}
+    .stButton>button * {{
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
         font-weight: bold !important;
     }}
     
-    div[data-baseweb="tab-highlight"] {{
-        background-color: {c['h1']} !important;
-    }}
-    /* ========================================= */
-    
-    /* ปุ่ม */
-    .stButton>button {{
-        background: {c['btn_grad']}; color: white; border-radius: 20px;
-        border: none; padding: 10px 28px; box-shadow: 0 4px 10px {c['btn_shadow']}; font-weight: bold;
-    }}
-    .stButton>button:hover {{ transform: scale(1.05); }}
-    
-    /* บังคับให้ช่องกรอกข้อมูลมีตัวหนังสือสีดำเสมอ */
-    .stTextInput>div>div>input {{ 
-        border-radius: 12px; 
-        border: 1px solid {c['input_border']}; 
+    /* 8. ช่อง Input และ Text Area */
+    .stTextInput input, .stTextArea textarea {{ 
         background-color: #FFFFFF !important; 
         color: #000000 !important; 
         -webkit-text-fill-color: #000000 !important;
-        caret-color: #000000 !important; 
+        border: 1.5px solid {c['input_border']} !important;
+        border-radius: 10px !important;
     }}
     
-    /* แก้ไข Text Area */
-    .stTextArea>div>div>textarea {{
-        border-radius: 12px; 
-        border: 1px solid {c['input_border']}; 
-        background-color: #FFFFFF !important; 
-        color: #000000 !important;
-        -webkit-text-fill-color: #000000 !important;
+    /* 9. กล่องข้อความแจ้งเตือนสีฟ้า (st.info) */
+    [data-testid="stAlert"] * {{
+        color: #0F172A !important;
+        -webkit-text-fill-color: #0F172A !important;
     }}
-    
-    /* แก้ไข Selectbox */
-    div[data-baseweb="select"] > div {{
-        border-radius: 12px;
-        border: 1px solid {c['input_border']};
-        background-color: #FFFFFF !important;
-        color: #000000 !important;
-    }}
-    
-    /* ตาราง */
-    [data-testid="stDataFrame"] {{ border-radius: 10px; overflow: hidden; border: 1px solid {c['table_border']}; }}
     </style>
     """, unsafe_allow_html=True)
 
