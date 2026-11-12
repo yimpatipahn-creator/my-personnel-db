@@ -841,13 +841,13 @@ if tab2:
         col_id_input, col_id_hint = st.columns([1, 2])
         with col_id_input:
             new_id_input = st.text_input(
-                "1. เลขรหัส (จำเป็น) *", 
-                key="temp_id", 
+                "1. เลขรหัส (จำเป็น) *",
+                key="temp_id",
                 max_chars=50,
                 placeholder="เช่น บ.123"
             ).strip()
 
-is_id_invalid = False
+        is_id_invalid = False
         with col_id_hint:
             if new_id_input:
                 # 1. ดึงหมวดตัวอักษร (เช่น พิมพ์ "บ" หรือ "บ." หรือ "บ.12") และแสดงเลขล่าสุดทันที
@@ -867,7 +867,7 @@ is_id_invalid = False
                     is_id_invalid = True
                 else:
                     st.success("✅ รูปแบบรหัสถูกต้องและสามารถใช้งานได้")
-                    
+
         with st.form("add_record_form", clear_on_submit=False):
             c1, c2 = st.columns(2)
             with c1:
@@ -920,7 +920,7 @@ is_id_invalid = False
                     except Exception:
                         logger.exception("append_record failed")
                         ok, msg = False, "บันทึกลง Google Sheets ไม่สำเร็จ (กรุณาลองกดบันทึกอีกครั้ง)"
-                    
+
                     if ok:
                         st.session_state["_reset_form"] = True
                         flash("✅ " + msg, "💾")
