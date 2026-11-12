@@ -401,61 +401,105 @@ with tab1:
         st.info("พิมพ์รหัส, ชื่อ หรือนามสกุล เพื่อค้นหาข้อมูล")
 
 # --- TAB 2: บันทึกข้อมูลใหม่ ---
+# --- TAB 2: บันทึกข้อมูลใหม่ ---
 if tab2:
     with tab2:
         st.subheader("📝 เพิ่มข้อมูลใหม่")
-        
+
+        # เคลียร์ฟอร์มหลังบันทึกสำเร็จ
+        if st.session_state.pop("_reset_form", False):
+            st.session_state.update({
+                "temp_id": "", "f_name": "", "f_surname": "", "f_status": "",
+                "f_special": "-", "f_pension": "-", "f_note": "",
+            })
+
         col_id_input, col_id_hint = st.columns([1, 2])
-        with col_id_input: 
-            new_id_input = st.text_input("1. เลขรหัส (จำเป็น) *", key="temp_id").strip()
-            
-        is_duplicate = False
+        with col_id_input:
+            new_id_input = st.text_input(
+                "1. เลขรหัส (จำเป็น) *", 
+                key="temp_id", 
+                max_chars=50,
+                placeholder="เช่น บ.123"
+            ).strip()
+
+        is_id_invalid = False
         with col_id_hint:
             if new_id_input:
-                if not df.empty and new_id_input in df['เลขรหัส'].values:
+                # 1. ตรวจสอบรูปแบบตัวอักษร + จุด + ตัวเลข
+                if not STRICT_ID_RE.match(new_id_input):
+                    st.error("❌ รูปแบบรหัสไม่ถูกต้อง! ต้องประกอบด้วยตัวอักษร จุด และตัวเลข (เช่น บ.123)")
+                    is_id_invalid = True
+                # 2. ตรวจสอบรหัสซ้ำ
+                elif norm_id(new_id_input) in {norm_id(v) for v in df['เลขรหัส'].values}:
                     st.error("❌ รหัสนี้ถูกใช้งานแล้ว!")
-                    is_duplicate = True
+                    is_id_invalid = True
+                # 3. ถ้ารูปแบบถูกต้องและไม่ซ้ำ ให้แสดงเลขล่าสุดในหมวดนั้น
                 else:
-                    match = re.match(r"([ก-ฮa-zA-Z]+\.?)", new_id_input)
-                    prefix = match.group(1) if match else (new_id_input[0] if len(new_id_input) > 0 else "")
+                    prefix = extract_prefix(new_id_input)
                     if prefix:
                         last = get_last_id_in_category(df, prefix)
-                        st.info(f"หมวด '{prefix}' ล่าสุดคือ: **{last}**")
-        
-        with st.form("add_record_form", clear_on_submit=True):
+                        st.info(f"✅ รูปแบบถูกต้อง | หมวด '{prefix}' ล่าสุดคือ: **{last}**")
+
+        with st.form("add_record_form", clear_on_submit=False):
             c1, c2 = st.columns(2)
-            with c1: new_name = st.text_input("2. ชื่อ (จำเป็น) *").strip()
-            with c2: new_surname = st.text_input("3. นามสกุล (จำเป็น) *").strip()
-            
+            with c1:
+                new_name = st.text_input("2. ชื่อ (จำเป็น) *", key="f_name", max_chars=100).strip()
+            with c2:
+                new_surname = st.text_input("3. นามสกุล (จำเป็น) *", key="f_surname", max_chars=100).strip()
+
             c1, c2, c3 = st.columns(3)
-            with c1: new_status = st.selectbox("4. สถานะ *", ["", "ขรก.", "ลจ."])
-            with c2: new_special = st.selectbox("เงินช่วยพิเศษ", ["-", "มี", "ไม่มี"])
-            with c3: new_pension = st.selectbox("บำเหน็จตกทอด", ["-", "มี", "ไม่มี"])
-            
-            new_note = st.text_area("หมายเหตุ").strip()
-            
-            submitted = st.form_submit_button("💾 บันทึกข้อมูล", type="primary", disabled=is_duplicate)
-            
+            with c1:
+                new_status = st.selectbox("4. สถานะ (จำเป็น) *", ["", "ขรก.", "ลจ."], key="f_status")
+            with c2:
+                new_special = st.selectbox("5. เงินช่วยพิเศษ (จำเป็น) *", ["", "มี", "ไม่มี", "-"], key="f_special")
+            with c3:
+                new_pension = st.selectbox("6. บำเหน็จตกทอด (จำเป็น) *", ["", "มี", "ไม่มี", "-"], key="f_pension")
+
+            new_note = st.text_area("7. หมายเหตุ (ถ้าไม่มีให้ใส่ -)", key="f_note", max_chars=500).strip()
+
+            submitted = st.form_submit_button("💾 บันทึกข้อมูล", type="primary", disabled=is_id_invalid)
+
             if submitted:
-                if not (new_id_input and new_name and new_surname and new_status):
-                    st.error("❌ กรุณากรอกข้อมูลในช่องที่มีเครื่องหมาย * ให้ครบถ้วน")
-                elif is_duplicate:
+                # รวบรวมรายการช่องที่ยังไม่ได้กรอก (หากไม่ต้องการบังคับช่อง "หมายเหตุ" ให้ลบ ("หมายเหตุ", new_note) ออกจากรายการนี้)
+                required_fields = [
+                    ("เลขรหัส", new_id_input),
+                    ("ชื่อ", new_name),
+                    ("นามสกุล", new_surname),
+                    ("สถานะ", new_status),
+                    ("เงินช่วยพิเศษ", new_special),
+                    ("บำเหน็จตกทอด", new_pension),
+                    ("หมายเหตุ", new_note),
+                ]
+                missing_fields = [label for label, val in required_fields if not val]
+
+                if missing_fields:
+                    st.error(f"❌ กรุณากรอกข้อมูลให้ครบทุกช่อง (ยังขาด: {', '.join(missing_fields)})")
+                elif not STRICT_ID_RE.match(new_id_input):
+                    st.error("❌ เลขรหัสต้องมีทั้งตัวอักษร จุด และตัวเลขครบถ้วน (เช่น บ.123)")
+                elif is_id_invalid:
                     st.error("❌ รหัสซ้ำ ไม่สามารถบันทึกได้")
                 else:
                     new_row = {
-                        'เลขรหัส': new_id_input, 
-                        'สถานะ': new_status, 
-                        'ชื่อ': new_name, 
-                        'นามสกุล': new_surname, 
-                        'เงินช่วยพิเศษ': new_special, 
-                        'บำเหน็จตกทอด': new_pension, 
-                        'หมายเหตุ': new_note
+                        'เลขรหัส': new_id_input,
+                        'สถานะ': new_status,
+                        'ชื่อ': new_name,
+                        'นามสกุล': new_surname,
+                        'เงินช่วยพิเศษ': new_special,
+                        'บำเหน็จตกทอด': new_pension,
+                        'หมายเหตุ': new_note,
                     }
-                    if append_to_gsheet(new_row):
-                        st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_row])], ignore_index=True)
-                        st.success("✅ บันทึกข้อมูลสำเร็จ!")
-                        time.sleep(0.4)
+                    try:
+                        ok, msg = append_record(new_row)
+                    except Exception:
+                        logger.exception("append_record failed")
+                        ok, msg = False, "บันทึกลง Google Sheets ไม่สำเร็จ (กรุณาลองกดบันทึกอีกครั้ง)"
+                    
+                    if ok:
+                        st.session_state["_reset_form"] = True
+                        flash("✅ " + msg, "💾")
                         st.rerun()
+                    else:
+                        st.error("❌ " + msg)
 
 # --- TAB 3: ดูตารางรวม ---
 with tab3:
