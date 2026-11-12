@@ -847,24 +847,27 @@ if tab2:
                 placeholder="เช่น บ.123"
             ).strip()
 
-        is_id_invalid = False
+is_id_invalid = False
         with col_id_hint:
             if new_id_input:
-                # 1. ตรวจสอบรูปแบบตัวอักษร + จุด + ตัวเลข
-                if not STRICT_ID_RE.match(new_id_input):
-                    st.error("❌ รูปแบบรหัสไม่ถูกต้อง! ต้องประกอบด้วยตัวอักษร จุด และตัวเลข (เช่น บ.123)")
-                    is_id_invalid = True
+                # 1. ดึงหมวดตัวอักษร (เช่น พิมพ์ "บ" หรือ "บ." หรือ "บ.12") และแสดงเลขล่าสุดทันที
+                prefix = extract_prefix(new_id_input)
+                if prefix:
+                    search_prefix = prefix if prefix.endswith(".") else prefix + "."
+                    last = get_last_id_in_category(df, search_prefix)
+                    st.info(f"📌 หมวด '{search_prefix}' ล่าสุดคือ: **{last}**")
+
                 # 2. ตรวจสอบรหัสซ้ำ
-                elif norm_id(new_id_input) in {norm_id(v) for v in df['เลขรหัส'].values}:
+                if norm_id(new_id_input) in {norm_id(v) for v in df['เลขรหัส'].values}:
                     st.error("❌ รหัสนี้ถูกใช้งานแล้ว!")
                     is_id_invalid = True
-                # 3. ถ้ารูปแบบถูกต้องและไม่ซ้ำ ให้แสดงเลขล่าสุดในหมวดนั้น
+                # 3. ตรวจสอบรูปแบบให้ครบ (ต้องมีตัวอักษร + จุด + ตัวเลข เช่น บ.123)
+                elif not STRICT_ID_RE.match(new_id_input):
+                    st.warning("⚠️ กรุณาระบุเลขรหัสให้ครบทั้งตัวอักษร จุด และตัวเลข (เช่น บ.123) จึงจะบันทึกได้")
+                    is_id_invalid = True
                 else:
-                    prefix = extract_prefix(new_id_input)
-                    if prefix:
-                        last = get_last_id_in_category(df, prefix)
-                        st.info(f"✅ รูปแบบถูกต้อง | หมวด '{prefix}' ล่าสุดคือ: **{last}**")
-
+                    st.success("✅ รูปแบบรหัสถูกต้องและสามารถใช้งานได้")
+                    
         with st.form("add_record_form", clear_on_submit=False):
             c1, c2 = st.columns(2)
             with c1:
