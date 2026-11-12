@@ -1,513 +1,342 @@
-import streamlit as st
-import pandas as pd
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import functools
+import hmac
+import logging
+import os
 import re
+import threading
 import time
+
+import bcrypt
+import gspread
+import pandas as pd
+import requests
+import streamlit as st
+from gspread.utils import rowcol_to_a1
 
 # --- ตั้งค่าหน้าเว็บ ---
 st.set_page_config(page_title="ระบบทะเบียนคุมเลขรหัสหนังสือ (Online)", layout="wide")
 
-# ==========================================
-# ⚙️ ตั้งค่า (Google Sheets)
-# ==========================================
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1DziBBBmgoXnUiX-MvsuUGTIEHvD5Jqjib1Ap-bmhins/edit?usp=sharing"
-KEY_FILE = "credentials.json"
+logger = logging.getLogger("registry_app")
 
-# --- ฟังก์ชันเรียงลำดับแบบธรรมชาติ (Natural Sort Key) ---
+# ==========================================
+# ⚙️ ค่าคงที่ / การตั้งค่า
+# ==========================================
+KEY_FILE = "credentials.json"  # ใช้เฉพาะตอนรันในเครื่อง ถ้าไม่มี st.secrets
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+USER_COLS = ["Username", "Password", "Role"]
+DATA_COLS = ['เลขรหัส', 'สถานะ', 'ชื่อ', 'นามสกุล', 'เงินช่วยพิเศษ', 'บำเหน็จตกทอด', 'หมายเหตุ']
+VALID_ROLES = ("Admin", "Editor", "User")
+ROLE_MAP = {r.lower(): r for r in VALID_ROLES}
+
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
+MIN_PW_LEN, MAX_PW_LEN = 6, 64
+MAX_FAILS = 5            # ใส่รหัสผิดได้กี่ครั้งก่อนถูกล็อก
+LOCK_SECONDS = 300       # ล็อกกี่วินาที
+SESSION_HOURS = 8        # หมดเวลาใช้งานอัตโนมัติ
+
+# คำนำหน้าหมวดรหัส และรูปแบบบังคับกรอก (ต้องมีตัวอักษร + จุด + ตัวเลข เช่น บ.123)
+ID_PREFIX_RE = re.compile(r"^((?:[ก-ฮA-Za-z]+\.?)+)")
+STRICT_ID_RE = re.compile(r"^(?:[ก-ฮA-Za-z]+\.)+[0-9]+$")
+
+
+# ==========================================
+# 🧰 ฟังก์ชันช่วยทั่วไป
+# ==========================================
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'([0-9]+)', str(s))]
 
-# --- เชื่อมต่อ Google Sheets ---
-@st.cache_resource
-def init_connection():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
+def secret(key, default=None):
+    """อ่านค่าจาก st.secrets แบบไม่ error ถ้าไม่มีไฟล์ secrets"""
     try:
-        if "gcp_service_account" in st.secrets:
-            creds_dict = st.secrets["gcp_service_account"]
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        else:
-            creds = ServiceAccountCredentials.from_json_keyfile_name(KEY_FILE, scope)
-            
-        client = gspread.authorize(creds)
-        return client
-    except Exception as e:
-        st.error(f"❌ เชื่อมต่อ Google Sheets ไม่สำเร็จ: {e}")
+        return st.secrets[key] if key in st.secrets else default
+    except Exception:
+        return default
+
+
+def normalize_role(value):
+    return ROLE_MAP.get(str(value).strip().lower(), "User")
+
+
+def norm_id(value):
+    return str(value).strip().casefold()
+
+
+def extract_prefix(value):
+    m = ID_PREFIX_RE.match(str(value).strip())
+    return m.group(1) if m else ""
+
+
+def flash(message, icon=None):
+    """เก็บข้อความไว้แสดงหลัง st.rerun()"""
+    st.session_state.setdefault("_flash", []).append((message, icon))
+
+
+def show_flash():
+    for message, icon in st.session_state.pop("_flash", []):
+        st.toast(message, icon=icon)
+
+
+def show_df(d):
+    d = d.fillna("").astype(str)
+    try:
+        st.dataframe(d, width="stretch", hide_index=True)
+    except TypeError:
+        st.dataframe(d, use_container_width=True, hide_index=True)
+
+
+def guard(fn, *args, **kwargs):
+    """เรียกฟังก์ชันที่ต่อ Google Sheets ถ้าพังให้แสดงข้อความที่อ่านรู้เรื่องแล้วหยุดหน้า"""
+    try:
+        return fn(*args, **kwargs)
+    except RuntimeError as e:
+        st.error(f"❌ {e}")
+        st.stop()
+    except Exception:
+        logger.exception("Google Sheets operation failed")
+        st.error("❌ เชื่อมต่อ Google Sheets ไม่สำเร็จ หรือใช้โควตาเต็มชั่วคราว กรุณารอสักครู่แล้วลองใหม่")
         st.stop()
 
+
 # ==========================================
-# 🎨 ระบบจัดการธีมสี (Theme Manager) - แก้ไขตัวหนังสือกลืน 100%
+# 🔁 Retry สำหรับ Google Sheets API
 # ==========================================
-def apply_theme(theme_name):
-    themes = {
-        "🌿 เขียว-ฟ้า (Green)": {
-            "bg": "#F4F9F4", "sidebar": "#E8F5E9", "sidebar_border": "#A5D6A7",
-            "h1": "#1B5E20", "h1_shadow": "#C8E6C9", "h2": "#2E7D32",
-            "tab_active": "#1B5E20",
-            "btn_grad": "linear-gradient(to right, #43A047, #1E88E5)", "btn_shadow": "rgba(30, 136, 229, 0.3)",
-            "input_border": "#81C784", "table_border": "#A5D6A7"
-        },
-        "🌸 ชมพู-ฟ้า (Pink)": {
-            "bg": "#FDF2F4", "sidebar": "#FCE4EC", "sidebar_border": "#F48FB1",
-            "h1": "#AD1457", "h1_shadow": "#F8BBD0", "h2": "#C2185B",
-            "tab_active": "#AD1457",
-            "btn_grad": "linear-gradient(to right, #D81B60, #8E24AA)", "btn_shadow": "rgba(216, 27, 96, 0.3)",
-            "input_border": "#F48FB1", "table_border": "#F8BBD0"
-        },
-        "🍊 ส้ม-ครีม (Orange)": {
-            "bg": "#FFF8F0", "sidebar": "#FFF3E0", "sidebar_border": "#FFCC80",
-            "h1": "#BF360C", "h1_shadow": "#FFE0B2", "h2": "#D84315",
-            "tab_active": "#BF360C",
-            "btn_grad": "linear-gradient(to right, #FB8C00, #F4511E)", "btn_shadow": "rgba(244, 81, 30, 0.3)",
-            "input_border": "#FFB74D", "table_border": "#FFE0B2"
-        },
-        "🏢 เทา-น้ำเงิน (Professional)": {
-            "bg": "#F8FAFC", "sidebar": "#EDF2F7", "sidebar_border": "#CBD5E1",
-            "h1": "#0F172A", "h1_shadow": "#E2E8F0", "h2": "#1E293B",
-            "tab_active": "#0F172A",
-            "btn_grad": "linear-gradient(to right, #334155, #475569)", "btn_shadow": "rgba(51, 65, 85, 0.3)",
-            "input_border": "#94A3B8", "table_border": "#CBD5E1"
-        }
-    }
-    
-    c = themes.get(theme_name, themes["🌿 เขียว-ฟ้า (Green)"])
+def with_retry(attempts=3, base_delay=1.0, write=False):
+    retry_codes = {429} if write else {429, 500, 502, 503, 504}
 
-    st.markdown(f"""
-    <style>
-    /* 1. บังคับพื้นหลังและตัวหนังสือหลักของหน้าจอ */
-    .stApp {{ 
-        background-color: {c['bg']} !important; 
-        color: #111827 !important; 
-    }}
-    
-    /* 2. Sidebar และส่วนประกอบด้านซ้ายทั้งหมด */
-    [data-testid="stSidebar"] {{ 
-        background-color: {c['sidebar']} !important; 
-        border-right: 2px solid {c['sidebar_border']}; 
-    }}
-    [data-testid="stSidebar"] p, 
-    [data-testid="stSidebar"] span, 
-    [data-testid="stSidebar"] label,
-    [data-testid="stSidebar"] h1,
-    [data-testid="stSidebar"] h2,
-    [data-testid="stSidebar"] h3 {{
-        color: #111827 !important;
-    }}
-    
-    /* แก้ไขข้อความใน Expander "จัดการผู้ใช้งาน" ที่มองไม่เห็น */
-    [data-testid="stExpander"] details summary,
-    [data-testid="stExpander"] details summary * {{
-        color: #111827 !important;
-        font-weight: 600 !important;
-    }}
-    
-    /* 3. แก้ไขแถบเมนูแท็บ (Tabs) ที่ตัวหนังสือสีขาว/กลืน */
-    div[data-baseweb="tab-list"] button {{
-        background: transparent !important;
-    }}
-    /* แท็บทั่วไปที่ไม่ได้คลิกเลือก (ให้เป็นสีเทาเข้ม ชัดเจนแน่นอน) */
-    div[data-baseweb="tab-list"] button * {{
-        color: #374151 !important;
-        -webkit-text-fill-color: #374151 !important;
-        font-size: 16px !important;
-        font-weight: 600 !important;
-    }}
-    /* แท็บที่กำลังเลือกอยู่ (Active) */
-    div[data-baseweb="tab-list"] button[aria-selected="true"] * {{
-        color: {c['tab_active']} !important;
-        -webkit-text-fill-color: {c['tab_active']} !important;
-        font-weight: 800 !important;
-    }}
-    /* เส้นขีดใต้แท็บ */
-    div[data-baseweb="tab-highlight"] {{
-        background-color: {c['tab_active']} !important;
-        height: 3px !important;
-    }}
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            for i in range(attempts):
+                try:
+                    return fn(*args, **kwargs)
+                except gspread.exceptions.APIError as e:
+                    code = getattr(getattr(e, "response", None), "status_code", None)
+                    if code not in retry_codes or i == attempts - 1:
+                        raise
+                except requests.exceptions.RequestException:
+                    if write or i == attempts - 1:
+                        raise
+                time.sleep(base_delay * (2 ** i))
+        return wrapper
+    return decorator
 
-    /* 4. แก้ไขกล่อง Dropdown Selectbox ที่พื้นหลังดำจนมองไม่เห็น */
-    div[data-baseweb="select"] > div {{
-        background-color: #FFFFFF !important;
-        border-radius: 10px !important;
-        border: 1.5px solid {c['input_border']} !important;
-    }}
-    div[data-baseweb="select"] * {{
-        color: #111827 !important;
-        -webkit-text-fill-color: #111827 !important;
-    }}
-    /* เมนูตัวเลือกด้านใน dropdown เมื่อคลิกเปิด */
-    ul[data-baseweb="menu"] {{
-        background-color: #FFFFFF !important;
-    }}
-    ul[data-baseweb="menu"] li * {{
-        color: #111827 !important;
-    }}
 
-    /* 5. หัวข้อขนาดต่าง ๆ */
-    h1 {{ 
-        color: {c['h1']} !important; 
-        text-shadow: 1px 1px 2px {c['h1_shadow']}; 
-        font-family: 'Sarabun', sans-serif; 
-    }}
-    h2, h3, h4, h5, h6 {{ 
-        color: {c['h2']} !important; 
-        font-weight: 700 !important;
-    }}
+@with_retry()
+def _get_values(ws):
+    return ws.get_all_values()
 
-    /* 6. ตัวหนังสือทั่วไป ป้ายข้อความ และคำอธิบาย */
-    p, span, label, [data-testid="stWidgetLabel"] p {{ 
-        color: #111827 !important; 
-        -webkit-text-fill-color: #111827 !important;
-        font-weight: 500 !important;
-    }}
-    
-    /* 7. ปุ่มกด */
-    .stButton>button {{
-        background: {c['btn_grad']} !important; 
-        border-radius: 20px !important;
-        border: none !important; 
-        padding: 8px 24px !important; 
-        box-shadow: 0 4px 10px {c['btn_shadow']} !important; 
-    }}
-    .stButton>button * {{
-        color: #FFFFFF !important;
-        -webkit-text-fill-color: #FFFFFF !important;
-        font-weight: bold !important;
-    }}
-    
-    /* 8. ช่อง Input และ Text Area */
-    .stTextInput input, .stTextArea textarea {{ 
-        background-color: #FFFFFF !important; 
-        color: #000000 !important; 
-        -webkit-text-fill-color: #000000 !important;
-        border: 1.5px solid {c['input_border']} !important;
-        border-radius: 10px !important;
-    }}
-    
-    /* 9. กล่องข้อความแจ้งเตือนสีฟ้า (st.info) */
-    [data-testid="stAlert"] * {{
-        color: #0F172A !important;
-        -webkit-text-fill-color: #0F172A !important;
-    }}
-    </style>
-    """, unsafe_allow_html=True)
+
+@with_retry()
+def _row_values(ws, row):
+    return ws.row_values(row)
+
+
+@with_retry()
+def _col_values(ws, col):
+    return ws.col_values(col)
+
+
+@with_retry(write=True)
+def _append_row(ws, row):
+    ws.append_row(row, value_input_option="RAW")
+
+
+@with_retry(write=True)
+def _update_cell(ws, row, col, value):
+    ws.update_cell(row, col, value)
+
+
+@with_retry(write=True)
+def _batch_update(ws, data):
+    ws.batch_update(data, value_input_option="RAW")
+
+
+# ==========================================
+# 🔌 เชื่อมต่อ Google Sheets
+# ==========================================
+@st.cache_resource(show_spinner=False)
+def get_write_lock():
+    return threading.Lock()
+
+
+@st.cache_resource(ttl=3000, show_spinner=False)
+def _book():
+    sheet_url = secret("sheet_url") or os.environ.get("SHEET_URL")
+    if not sheet_url:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า sheet_url ใน st.secrets")
+
+    info = secret("gcp_service_account")
+    if info:
+        client = gspread.service_account_from_dict(dict(info), scopes=SCOPES)
+    elif os.path.exists(KEY_FILE):
+        client = gspread.service_account(filename=KEY_FILE, scopes=SCOPES)
+    else:
+        raise RuntimeError("ไม่พบ gcp_service_account ใน st.secrets และไม่พบไฟล์ credentials.json")
+    return client.open_by_url(sheet_url)
+
+
+@st.cache_resource(ttl=3000, show_spinner=False)
+def _data_ws():
+    return _book().sheet1
+
+
+@st.cache_resource(ttl=3000, show_spinner=False)
+def _users_ws():
+    book = _book()
+    try:
+        return book.worksheet("Users")
+    except gspread.exceptions.WorksheetNotFound:
+        initial_pw = str(secret("initial_admin_password") or "")
+        if len(initial_pw) < MIN_PW_LEN:
+            raise RuntimeError(
+                "ยังไม่มีชีต 'Users' — กรุณาตั้งค่า initial_admin_password "
+                f"(อย่างน้อย {MIN_PW_LEN} ตัวอักษร) ใน st.secrets เพื่อสร้างบัญชี admin ครั้งแรก"
+            )
+        ws = book.add_worksheet(title="Users", rows=100, cols=len(USER_COLS))
+        _append_row(ws, USER_COLS)
+        _append_row(ws, ["admin", hash_pw(initial_pw), "Admin"])
+        return ws
+
+
+def values_to_df(values, required):
+    if not values:
+        return pd.DataFrame(columns=list(required))
+    headers = [str(h).strip() for h in values[0]]
+    n = len(headers)
+    rows = [(list(r) + [""] * n)[:n] for r in values[1:]]
+    df = pd.DataFrame(rows, columns=headers).astype(str)
+    keep = [c != "" and "Unnamed" not in c for c in df.columns]
+    return df.loc[:, keep]
+
+
+# ==========================================
+# 🔐 รหัสผ่าน (bcrypt) และกันเดารหัส
+# ==========================================
+def hash_pw(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode("utf-8")[:72], bcrypt.gensalt()).decode()
+
+
+def is_hashed(stored: str) -> bool:
+    return str(stored).startswith(("$2a$", "$2b$", "$2y$"))
+
+
+def verify_pw(pw: str, stored: str):
+    stored = (stored or "").strip()
+    if not stored or not pw:
+        return False, False
+    if is_hashed(stored):
+        try:
+            return bcrypt.checkpw(pw.encode("utf-8")[:72], stored.encode()), False
+        except ValueError:
+            return False, False
+    return hmac.compare_digest(pw.encode("utf-8"), stored.encode("utf-8")), True
+
+
+@st.cache_resource(show_spinner=False)
+def _dummy_hash():
+    return hash_pw("dummy-password-for-timing")
+
+
+@st.cache_resource(show_spinner=False)
+def _login_state():
+    return {"lock": threading.Lock(), "attempts": {}}
+
+
+def _key(username):
+    return username.strip().lower()[:64]
+
+
+def lock_remaining(username):
+    state = _login_state()
+    with state["lock"]:
+        rec = state["attempts"].get(_key(username))
+        return max(0, int(rec["until"] - time.time())) if rec else 0
+
+
+def register_failure(username):
+    state = _login_state()
+    now = time.time()
+    with state["lock"]:
+        attempts = state["attempts"]
+        if len(attempts) > 2000:
+            for k in [k for k, v in attempts.items() if v["until"] < now and now - v["last"] > LOCK_SECONDS]:
+                del attempts[k]
+        rec = attempts.setdefault(_key(username), {"count": 0, "until": 0.0, "last": now})
+        if now - rec["last"] > LOCK_SECONDS:
+            rec["count"] = 0
+        rec["last"] = now
+        rec["count"] += 1
+        if rec["count"] >= MAX_FAILS:
+            rec["until"] = now + LOCK_SECONDS
+            rec["count"] = 0
+
+
+def clear_failures(username):
+    state = _login_state()
+    with state["lock"]:
+        state["attempts"].pop(_key(username), None)
+
 
 # ==========================================
 # 👥 ระบบจัดการผู้ใช้งาน (Users System)
 # ==========================================
-def get_users_data():
-    client = init_connection()
-    sh = client.open_by_url(SHEET_URL)
-    try:
-        worksheet = sh.worksheet("Users")
-    except Exception:
-        worksheet = sh.add_worksheet(title="Users", rows="100", cols="3")
-        worksheet.append_row(["Username", "Password", "Role"])
-        worksheet.append_row(["admin", "1234", "Admin"])
-        
-    all_values = worksheet.get_all_values()
-    if not all_values: 
-        return pd.DataFrame(columns=["Username", "Password", "Role"]), worksheet
-    headers = all_values[0]
-    data = all_values[1:]
-    df = pd.DataFrame(data, columns=headers).astype(str)
-    return df, worksheet
+def read_users_fresh():
+    df = values_to_df(_get_values(_users_ws()), USER_COLS)
+    missing = [c for c in USER_COLS if c not in df.columns]
+    if missing:
+        raise RuntimeError(f"ชีต Users ขาดคอลัมน์: {', '.join(missing)}")
+    df = df.copy()
+    df["_row"] = range(2, len(df) + 2)
+    df["Username"] = df["Username"].str.strip()
+    df["Password"] = df["Password"].str.strip()
+    df["Role"] = df["Role"].map(normalize_role)
+    df = df[df["Username"] != ""].reset_index(drop=True)
+    return df[USER_COLS + ["_row"]]
 
-def sign_up(username, password, users_df, user_sheet):
-    if len(password) < 4:
-        st.error("❌ รหัสผ่านต้องมีอย่างน้อย 4 ตัวอักษร")
+
+@st.cache_data(ttl=60, show_spinner=False)
+def users_df_cached():
+    return read_users_fresh()
+
+
+def clear_user_cache():
+    users_df_cached.clear()
+
+
+def find_user(df, username):
+    m = df[df["Username"].str.lower() == username.strip().lower()]
+    return m.iloc[0] if not m.empty else None
+
+
+def fresh_role(username):
+    row = find_user(read_users_fresh(), username)
+    return None if row is None else row["Role"]
+
+
+def require_role(*roles):
+    role = fresh_role(st.session_state.username)
+    if role is None or role not in roles:
+        if role is None:
+            logout()
+            flash("บัญชีนี้ไม่มีอยู่ในระบบแล้ว", "⚠️")
         return False
-    if username in users_df['Username'].values:
-        st.error("❌ ชื่อผู้ใช้งานนี้มีคนใช้แล้ว กรุณาเลือกชื่ออื่น")
-        return False
-    user_sheet.append_row([str(username), str(password), "User"])
-    st.success(f"✅ ลงทะเบียนสำเร็จ! คุณ {username} ได้รับสิทธิ์ 'User'")
+    st.session_state.role = role
     return True
 
-def check_login():
-    if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
-        st.session_state.username = ""
-        st.session_state.role = ""
 
-    if not st.session_state.logged_in:
-        apply_theme("🌿 เขียว-ฟ้า (Green)") 
-        
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.title("🔐 เข้าสู่ระบบ / ลงทะเบียน")
-            try:
-                users_df, user_sheet = get_users_data()
-                users_df['Username'] = users_df['Username'].str.strip()
-                users_df['Password'] = users_df['Password'].str.strip()
-            except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการเชื่อมต่อข้อมูลผู้ใช้: {e}")
-                st.stop()
-            
-            with st.form("login_form", clear_on_submit=False):
-                username = st.text_input("ชื่อผู้ใช้งาน (Username)").strip()
-                password = st.text_input("รหัสผ่าน (Password)", type="password").strip()
-                
-                c_login, c_signup = st.columns(2)
-                with c_login:
-                    submit_login = st.form_submit_button("เข้าสู่ระบบ (Login)", type="primary")
-                with c_signup:
-                    submit_signup = st.form_submit_button("ลงทะเบียน (Sign Up)")
+def validate_new_password(pw):
+    if len(pw) < MIN_PW_LEN:
+        return f"รหัสผ่านต้องมีอย่างน้อย {MIN_PW_LEN} ตัวอักษร"
+    if len(pw) > MAX_PW_LEN:
+        return f"รหัสผ่านต้องไม่เกิน {MAX_PW_LEN} ตัวอักษร"
+    return None
 
-            if submit_login:
-                user_row = users_df[users_df['Username'] == username]
-                if not user_row.empty and user_row.iloc[0]['Password'] == password:
-                    st.session_state.logged_in = True
-                    st.session_state.username = username
-                    st.session_state.role = user_row.iloc[0]['Role']
-                    st.toast(f"ยินดีต้อนรับคุณ {username}", icon="🎉")
-                    time.sleep(0.3)
-                    st.rerun()
-                else:
-                    st.error("❌ ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
-                    
-            elif submit_signup:
-                if username and password:
-                    if sign_up(username, password, users_df, user_sheet):
-                        st.toast("คุณสามารถเข้าสู่ระบบได้ทันที", icon="🔑")
-                else:
-                    st.error("กรุณากรอก Username และ Password ก่อนลงทะเบียน")
-                    
-        st.stop()
 
-check_login()
-
-# ==========================================
-# 🛠️ ฟังก์ชันจัดการข้อมูล (Data)
-# ==========================================
-def load_data():
-    try:
-        client = init_connection()
-        sheet = client.open_by_url(SHEET_URL).sheet1
-        all_values = sheet.get_all_values()
-        default_cols = ['เลขรหัส', 'สถานะ', 'ชื่อ', 'นามสกุล', 'เงินช่วยพิเศษ', 'บำเหน็จตกทอด', 'หมายเหตุ']
-        if not all_values: 
-            return pd.DataFrame(columns=default_cols)
-        
-        headers = all_values[0]
-        data = all_values[1:]
-        df = pd.DataFrame(data, columns=headers).astype(str)
-        for col in df.columns: 
-            df[col] = df[col].str.strip()
-        df = df[df['เลขรหัส'] != 'เลขรหัส']
-        df = df[df['เลขรหัส'] != '']
-        valid_cols = [c for c in df.columns if "Unnamed" not in c and c != ""]
-        return df[valid_cols]
-    except Exception as e:
-        st.error(f"❌ โหลดข้อมูลไม่ได้: {e}")
-        return pd.DataFrame()
-
-def append_to_gsheet(row_data_dict):
-    try:
-        client = init_connection()
-        sheet = client.open_by_url(SHEET_URL).sheet1
-        sheet.append_row(list(row_data_dict.values()))
-        return True
-    except Exception as e:
-        st.error(f"❌ เกิดข้อผิดพลาดขณะบันทึกลง Google Sheets: {e}")
-        return False
-
-def get_last_id_in_category(df, prefix):
-    if df.empty: 
-        return "ยังไม่มีข้อมูล"
-    df['เลขรหัส'] = df['เลขรหัส'].astype(str).str.strip()
-    filtered = df[df['เลขรหัส'].str.startswith(prefix)].copy()
-    if filtered.empty: 
-        return "ยังไม่มีข้อมูล"
-    sorted_ids = sorted(filtered['เลขรหัส'].tolist(), key=natural_sort_key)
-    return sorted_ids[-1] if sorted_ids else "ไม่พบ"
-
-# ==========================================
-# 🖥️ หน้าจอหลัก
-# ==========================================
-
-with st.sidebar:
-    st.write(f"สวัสดี, **{st.session_state.username}**")
-    st.divider()
-    selected_theme = st.selectbox("🎨 เลือกธีมสี", [
-        "🌿 เขียว-ฟ้า (Green)", 
-        "🌸 ชมพู-ฟ้า (Pink)", 
-        "🍊 ส้ม-ครีม (Orange)", 
-        "🏢 เทา-น้ำเงิน (Professional)"
-    ])
-    apply_theme(selected_theme)
-
-    if st.session_state.role == "Admin":
-        st.divider()
-        st.subheader("👑 ผู้ดูแลระบบ")
-        with st.expander("จัดการผู้ใช้งาน"):
-            users_df, user_sheet = get_users_data()
-            st.dataframe(users_df[['Username', 'Role']], use_container_width=True, hide_index=True)
-            st.write("--- แก้ไขสิทธิ์ ---")
-            with st.form("edit_user_form"):
-                user_list = users_df['Username'].tolist() if not users_df.empty else []
-                user_to_edit = st.selectbox("เลือก Username", user_list)
-                new_role = st.selectbox("เปลี่ยนสิทธิ์", ["Admin", "Editor", "User"])
-                if st.form_submit_button("บันทึกสิทธิ์"):
-                    if user_to_edit:
-                        idx = users_df[users_df['Username'] == user_to_edit].index[0]
-                        user_sheet.update_cell(idx + 2, 3, new_role) 
-                        st.toast("✅ บันทึกสิทธิ์เรียบร้อย!", icon="🔧")
-                        time.sleep(0.5)
-                        st.rerun()
-
-    st.divider()
-    if st.button("🔄 รีโหลดข้อมูล"):
-        st.session_state.df = load_data()
-        st.rerun()
-    if st.button("🚪 ออกจากระบบ"):
-        st.session_state.logged_in = False
-        st.session_state.username = ""
-        st.session_state.role = ""
-        st.rerun()
-
-st.title("📂 ระบบทะเบียนคุมเลขรหัสหนังสือ")
-st.caption(f"ผู้ใช้งาน: {st.session_state.username} | สิทธิ์: {st.session_state.role}")
-
-if 'df' not in st.session_state:
-    with st.spinner("กำลังโหลดข้อมูล..."):
-        st.session_state.df = load_data()
-
-df = st.session_state.df
-
-# กำหนดแท็บตามสิทธิ์การใช้งาน
-if st.session_state.role == "User":
-    tab1, tab3 = st.tabs(["🔍 ค้นหาข้อมูล", "💾 ดูตารางรวม"])
-    tab2 = None
-else:
-    tab1, tab2, tab3 = st.tabs(["🔍 ค้นหาข้อมูล", "📝 บันทึกข้อมูลใหม่", "💾 ดูตารางรวม"])
-
-# --- TAB 1: ค้นหาข้อมูล ---
-with tab1:
-    st.subheader("🔍 ค้นหาบุคลากร")
-    c1, c2, c3 = st.columns(3)
-    with c1: search_id = st.text_input("เลขรหัส", placeholder="เช่น ก.1").strip()
-    with c2: search_name = st.text_input("ชื่อ", placeholder="พิมพ์ชื่อ...").strip()
-    with c3: search_surname = st.text_input("นามสกุล", placeholder="พิมพ์นามสกุล...").strip()
-    
-    results = df.copy()
-    if search_id: results = results[results['เลขรหัส'].str.contains(search_id, na=False, case=False)]
-    if search_name: results = results[results['ชื่อ'].str.contains(search_name, na=False, case=False)]
-    if search_surname: results = results[results['นามสกุล'].str.contains(search_surname, na=False, case=False)]
-    
-    if search_id or search_name or search_surname:
-        st.success(f"พบ {len(results)} รายการ")
-        st.dataframe(results.fillna("").astype(str), use_container_width=True, hide_index=True)
-    else:
-        st.info("พิมพ์รหัส, ชื่อ หรือนามสกุล เพื่อค้นหาข้อมูล")
-
-# --- TAB 2: บันทึกข้อมูลใหม่ ---
-# --- TAB 2: บันทึกข้อมูลใหม่ ---
-if tab2:
-    with tab2:
-        st.subheader("📝 เพิ่มข้อมูลใหม่")
-
-        # เคลียร์ฟอร์มหลังบันทึกสำเร็จ
-        if st.session_state.pop("_reset_form", False):
-            st.session_state.update({
-                "temp_id": "", "f_name": "", "f_surname": "", "f_status": "",
-                "f_special": "-", "f_pension": "-", "f_note": "",
-            })
-
-        col_id_input, col_id_hint = st.columns([1, 2])
-        with col_id_input:
-            new_id_input = st.text_input(
-                "1. เลขรหัส (จำเป็น) *", 
-                key="temp_id", 
-                max_chars=50,
-                placeholder="เช่น บ.123"
-            ).strip()
-
-        is_id_invalid = False
-        with col_id_hint:
-            if new_id_input:
-                # 1. ตรวจสอบรูปแบบตัวอักษร + จุด + ตัวเลข
-                if not STRICT_ID_RE.match(new_id_input):
-                    st.error("❌ รูปแบบรหัสไม่ถูกต้อง! ต้องประกอบด้วยตัวอักษร จุด และตัวเลข (เช่น บ.123)")
-                    is_id_invalid = True
-                # 2. ตรวจสอบรหัสซ้ำ
-                elif norm_id(new_id_input) in {norm_id(v) for v in df['เลขรหัส'].values}:
-                    st.error("❌ รหัสนี้ถูกใช้งานแล้ว!")
-                    is_id_invalid = True
-                # 3. ถ้ารูปแบบถูกต้องและไม่ซ้ำ ให้แสดงเลขล่าสุดในหมวดนั้น
-                else:
-                    prefix = extract_prefix(new_id_input)
-                    if prefix:
-                        last = get_last_id_in_category(df, prefix)
-                        st.info(f"✅ รูปแบบถูกต้อง | หมวด '{prefix}' ล่าสุดคือ: **{last}**")
-
-        with st.form("add_record_form", clear_on_submit=False):
-            c1, c2 = st.columns(2)
-            with c1:
-                new_name = st.text_input("2. ชื่อ (จำเป็น) *", key="f_name", max_chars=100).strip()
-            with c2:
-                new_surname = st.text_input("3. นามสกุล (จำเป็น) *", key="f_surname", max_chars=100).strip()
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                new_status = st.selectbox("4. สถานะ (จำเป็น) *", ["", "ขรก.", "ลจ."], key="f_status")
-            with c2:
-                new_special = st.selectbox("5. เงินช่วยพิเศษ (จำเป็น) *", ["", "มี", "ไม่มี", "-"], key="f_special")
-            with c3:
-                new_pension = st.selectbox("6. บำเหน็จตกทอด (จำเป็น) *", ["", "มี", "ไม่มี", "-"], key="f_pension")
-
-            new_note = st.text_area("7. หมายเหตุ (ถ้าไม่มีให้ใส่ -)", key="f_note", max_chars=500).strip()
-
-            submitted = st.form_submit_button("💾 บันทึกข้อมูล", type="primary", disabled=is_id_invalid)
-
-            if submitted:
-                # รวบรวมรายการช่องที่ยังไม่ได้กรอก (หากไม่ต้องการบังคับช่อง "หมายเหตุ" ให้ลบ ("หมายเหตุ", new_note) ออกจากรายการนี้)
-                required_fields = [
-                    ("เลขรหัส", new_id_input),
-                    ("ชื่อ", new_name),
-                    ("นามสกุล", new_surname),
-                    ("สถานะ", new_status),
-                    ("เงินช่วยพิเศษ", new_special),
-                    ("บำเหน็จตกทอด", new_pension),
-                    ("หมายเหตุ", new_note),
-                ]
-                missing_fields = [label for label, val in required_fields if not val]
-
-                if missing_fields:
-                    st.error(f"❌ กรุณากรอกข้อมูลให้ครบทุกช่อง (ยังขาด: {', '.join(missing_fields)})")
-                elif not STRICT_ID_RE.match(new_id_input):
-                    st.error("❌ เลขรหัสต้องมีทั้งตัวอักษร จุด และตัวเลขครบถ้วน (เช่น บ.123)")
-                elif is_id_invalid:
-                    st.error("❌ รหัสซ้ำ ไม่สามารถบันทึกได้")
-                else:
-                    new_row = {
-                        'เลขรหัส': new_id_input,
-                        'สถานะ': new_status,
-                        'ชื่อ': new_name,
-                        'นามสกุล': new_surname,
-                        'เงินช่วยพิเศษ': new_special,
-                        'บำเหน็จตกทอด': new_pension,
-                        'หมายเหตุ': new_note,
-                    }
-                    try:
-                        ok, msg = append_record(new_row)
-                    except Exception:
-                        logger.exception("append_record failed")
-                        ok, msg = False, "บันทึกลง Google Sheets ไม่สำเร็จ (กรุณาลองกดบันทึกอีกครั้ง)"
-                    
-                    if ok:
-                        st.session_state["_reset_form"] = True
-                        flash("✅ " + msg, "💾")
-                        st.rerun()
-                    else:
-                        st.error("❌ " + msg)
-
-# --- TAB 3: ดูตารางรวม ---
-with tab3:
-    st.write(f"ข้อมูลทั้งหมด **{len(df)}** รายการ")
-    if not df.empty:
-        df_sorted = df.copy()
-        df_sorted['sort_key'] = df_sorted['เลขรหัส'].apply(natural_sort_key)
-        df_sorted = df_sorted.sort_values('sort_key').drop(columns=['sort_key'])
-        st.dataframe(df_sorted.fillna("").astype(str), use_container_width=True, hide_index=True)
-    else:
-        st.info("ยังไม่มีข้อมูลในตาราง")
+def sign_up(username, password, invite_code=""):
+    uname = username.strip().lower()
+    required_code = secret
