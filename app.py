@@ -1,10 +1,13 @@
+import base64
 import functools
+import hashlib
 import hmac
 import logging
 import os
 import re
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import gspread
@@ -33,10 +36,29 @@ VALID_ROLES = ("Admin", "Editor", "User")
 ROLE_MAP = {r.lower(): r for r in VALID_ROLES}
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
-MIN_PW_LEN, MAX_PW_LEN = 6, 64
+MIN_PW_LEN, MAX_PW_LEN = 8, 64
+COMMON_PASSWORDS = {
+    "12345678", "123456789", "1234567890", "password", "password1", "qwertyui",
+    "qwerty123", "11111111", "00000000", "abc12345", "iloveyou", "admin123",
+    "admin1234", "letmein1",
+}
+
+# --- ความปลอดภัยเพิ่มเติม ---
+MAX_FAILS_USER = 20       # ผิดสะสมต่อ username จากทุกเครื่อง (กันเดาแบบกระจาย)
+MAX_FAILS_CLIENT = 30     # ผิดสะสมต่อเครื่อง/IP ข้ามทุก username (กันไล่เดา username)
+STRIKE_DECAY = 6 * 3600   # ถูกล็อกซ้ำภายในเวลานี้ → ระยะล็อกเพิ่มเป็นทวีคูณ (สูงสุด 16 เท่า)
+IDLE_MINUTES = 60         # ไม่มีการใช้งานนานเท่านี้ → ออกจากระบบอัตโนมัติ
+SIGNUP_MAX_PER_HOUR = 10  # จำนวนบัญชีใหม่สูงสุดต่อชั่วโมง (รวมทั้งระบบ)
+FORMULA_PREFIXES = ("=", "+", "@")
+CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 MAX_FAILS = 5            # ใส่รหัสผิดได้กี่ครั้งก่อนถูกล็อก
 LOCK_SECONDS = 300       # ล็อกกี่วินาที
 SESSION_HOURS = 8        # หมดเวลาใช้งานอัตโนมัติ
+
+DATA_TTL = 120           # แคชข้อมูลหลัก (วินาที) — หลังบันทึก/กดรีโหลดจะล้างทันที
+USERS_TTL = 60           # แคชรายชื่อผู้ใช้ (ใช้ตอน login)
+HEADER_TTL = 300         # แคชหัวตาราง (แทบไม่เปลี่ยน)
+ROLE_TTL = 20            # แคชผลตรวจสิทธิ์ต่อ session (งาน Admin จะตรวจสดเสมอ)
 
 # คำนำหน้าหมวดรหัส และรูปแบบบังคับกรอก (ต้องมีตัวอักษร + จุด + ตัวเลข เช่น บ.123)
 ID_PREFIX_RE = re.compile(r"^((?:[ก-ฮA-Za-z]+\.?)+)")
@@ -89,12 +111,50 @@ def show_df(d):
         st.dataframe(d, use_container_width=True, hide_index=True)
 
 
+def visible(d):
+    """ตัดคอลัมน์ช่วยภายใน (ขึ้นต้นด้วย _) ออกก่อนแสดงผล"""
+    return d.loc[:, [c for c in d.columns if not str(c).startswith("_")]]
+
+
+def clean_text(value):
+    """ตัดอักขระควบคุมที่มองไม่เห็นออก แล้ว strip"""
+    return CTRL_RE.sub("", str(value)).strip()
+
+
+def looks_like_formula(value):
+    """กัน formula injection เมื่อมีคนนำข้อมูลไป export เปิดใน Excel/Sheets"""
+    return str(value).lstrip().startswith(FORMULA_PREFIXES)
+
+
+def client_id():
+    """ระบุเครื่องผู้ใช้จาก header ของ proxy (ต้องใช้ Streamlit >= 1.37)
+    ถ้าอ่านไม่ได้จะรวมเป็น 'unknown' ซึ่งทำให้การล็อกต่อเครื่องไม่แม่นยำ"""
+    try:
+        headers = st.context.headers
+        parts = [p.strip() for p in headers.get("X-Forwarded-For", "").split(",") if p.strip()]
+        if parts:
+            hops = max(1, int(secret("trusted_proxy_hops", 1)))
+            return (parts[-hops] if len(parts) >= hops else parts[0])[:64]
+        return (headers.get("X-Real-Ip", "") or "unknown")[:64]
+    except Exception:
+        return "unknown"
+
+
+def fmt_wait(seconds):
+    return f"{seconds} วินาที" if seconds < 90 else f"{-(-seconds // 60)} นาที"
+
+
 def guard(fn, *args, **kwargs):
     """เรียกฟังก์ชันที่ต่อ Google Sheets ถ้าพังให้แสดงข้อความที่อ่านรู้เรื่องแล้วหยุดหน้า"""
     try:
         return fn(*args, **kwargs)
     except RuntimeError as e:
-        st.error(f"❌ {e}")
+        logger.error("Configuration/runtime error: %s", e)
+        if st.session_state.get("logged_in"):
+            st.error(f"❌ {e}")
+        else:
+            # ยังไม่ล็อกอิน: ไม่เปิดเผยรายละเอียดการตั้งค่าระบบ
+            st.error("❌ ระบบยังไม่พร้อมใช้งาน กรุณาติดต่อผู้ดูแลระบบ")
         st.stop()
     except Exception:
         logger.exception("Google Sheets operation failed")
@@ -143,7 +203,14 @@ def _col_values(ws, col):
 
 @with_retry(write=True)
 def _append_row(ws, row):
-    ws.append_row(row, value_input_option="RAW")
+    # table_range="A1" ให้ต่อท้ายตารางที่เริ่มจาก A1 เสมอ (ไม่ให้ Google เดาตารางเอง)
+    # INSERT_ROWS แทรกแถวใหม่ ไม่เขียนทับข้อมูลที่อยู่ด้านล่าง
+    ws.append_row(
+        row,
+        value_input_option="RAW",
+        insert_data_option="INSERT_ROWS",
+        table_range="A1",
+    )
 
 
 @with_retry(write=True)
@@ -161,6 +228,12 @@ def _batch_update(ws, data):
 # ==========================================
 @st.cache_resource(show_spinner=False)
 def get_write_lock():
+    return threading.Lock()
+
+
+@st.cache_resource(show_spinner=False)
+def get_init_lock():
+    """ล็อกแยกสำหรับสร้างชีต Users (ห้ามใช้ล็อกเดียวกับ get_write_lock เพราะจะ deadlock)"""
     return threading.Lock()
 
 
@@ -185,22 +258,91 @@ def _data_ws():
     return _book().sheet1
 
 
+def _wait_for_users_ws(book, tries=5):
+    """รอให้อีก session/instance ที่กำลังสร้างชีต Users สร้างเสร็จ (รวมถึงเขียนหัวตาราง)"""
+    for _ in range(tries):
+        time.sleep(1)
+        try:
+            ws = book.worksheet("Users")
+        except gspread.exceptions.WorksheetNotFound:
+            continue
+        for _ in range(tries):
+            if _row_values(ws, 1):
+                return ws
+            time.sleep(1)
+        return ws
+    return None
+
+
 @st.cache_resource(ttl=3000, show_spinner=False)
 def _users_ws():
     book = _book()
-    try:
-        return book.worksheet("Users")
-    except gspread.exceptions.WorksheetNotFound:
+    with get_init_lock():
+        try:
+            return book.worksheet("Users")
+        except gspread.exceptions.WorksheetNotFound:
+            pass
+
         initial_pw = str(secret("initial_admin_password") or "")
         if len(initial_pw) < MIN_PW_LEN:
             raise RuntimeError(
                 "ยังไม่มีชีต 'Users' — กรุณาตั้งค่า initial_admin_password "
                 f"(อย่างน้อย {MIN_PW_LEN} ตัวอักษร) ใน st.secrets เพื่อสร้างบัญชี admin ครั้งแรก"
             )
-        ws = book.add_worksheet(title="Users", rows=100, cols=len(USER_COLS))
+        try:
+            ws = book.add_worksheet(title="Users", rows=100, cols=len(USER_COLS))
+        except gspread.exceptions.APIError:
+            # อาจมีอีก instance สร้างพร้อมกัน → ลองดึงชีตที่เพิ่งถูกสร้าง
+            ws = _wait_for_users_ws(book)
+            if ws is None:
+                raise
+            return ws
         _append_row(ws, USER_COLS)
         _append_row(ws, ["admin", hash_pw(initial_pw), "Admin"])
         return ws
+
+
+@st.cache_data(ttl=HEADER_TTL, show_spinner=False)
+def data_headers():
+    return [h.strip() for h in _row_values(_data_ws(), 1)]
+
+
+@st.cache_data(ttl=HEADER_TTL, show_spinner=False)
+def users_headers():
+    return [h.strip() for h in _row_values(_users_ws(), 1)]
+
+
+# --- Audit log: บันทึกเหตุการณ์สำคัญลงชีต AuditLog ---
+AUDIT_COLS = ["เวลา", "ผู้ใช้", "การกระทำ", "รายละเอียด"]
+TZ_TH = timezone(timedelta(hours=7))
+
+
+@st.cache_resource(ttl=3000, show_spinner=False)
+def _audit_ws():
+    book = _book()
+    with get_init_lock():
+        try:
+            return book.worksheet("AuditLog")
+        except gspread.exceptions.WorksheetNotFound:
+            pass
+        try:
+            ws = book.add_worksheet(title="AuditLog", rows=1000, cols=len(AUDIT_COLS))
+        except gspread.exceptions.APIError:
+            time.sleep(1)  # อาจมี instance อื่นสร้างพร้อมกัน
+            return book.worksheet("AuditLog")
+        _append_row(ws, AUDIT_COLS)
+        return ws
+
+
+def audit(action, detail="", user=None):
+    """บันทึกเหตุการณ์ (best-effort: ถ้าเขียนไม่ได้จะไม่ทำให้งานหลักล้ม) — ห้ามใส่รหัสผ่านใน detail"""
+    who = user if user is not None else st.session_state.get("username", "")
+    logger.info("AUDIT user=%s action=%s detail=%s", who, action, detail)
+    try:
+        ts = datetime.now(TZ_TH).strftime("%Y-%m-%d %H:%M:%S")
+        _append_row(_audit_ws(), [ts, who, action, str(detail)[:300]])
+    except Exception:
+        logger.exception("audit write failed")
 
 
 def values_to_df(values, required):
@@ -217,8 +359,13 @@ def values_to_df(values, required):
 # ==========================================
 # 🔐 รหัสผ่าน (bcrypt) และกันเดารหัส
 # ==========================================
+def _prep(pw: str) -> bytes:
+    """SHA-256 + base64 → 44 ไบต์เสมอ ไม่เกินลิมิต 72 ไบต์ของ bcrypt (รหัสผ่านไทยไม่ถูกตัดเงียบ ๆ)"""
+    return base64.b64encode(hashlib.sha256(pw.encode("utf-8")).digest())
+
+
 def hash_pw(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode("utf-8")[:72], bcrypt.gensalt()).decode()
+    return bcrypt.hashpw(_prep(pw), bcrypt.gensalt()).decode()
 
 
 def is_hashed(stored: str) -> bool:
@@ -226,14 +373,20 @@ def is_hashed(stored: str) -> bool:
 
 
 def verify_pw(pw: str, stored: str):
+    """คืน (ถูกต้องไหม, ควรอัปเกรด hash ไหม)"""
     stored = (stored or "").strip()
     if not stored or not pw:
         return False, False
     if is_hashed(stored):
         try:
-            return bcrypt.checkpw(pw.encode("utf-8")[:72], stored.encode()), False
+            if bcrypt.checkpw(_prep(pw), stored.encode()):
+                return True, False
+            # hash แบบเก่า (bcrypt ตรง ๆ ตัดที่ 72 ไบต์) → ผ่านแล้วให้อัปเกรด
+            if bcrypt.checkpw(pw.encode("utf-8")[:72], stored.encode()):
+                return True, True
         except ValueError:
-            return False, False
+            pass
+        return False, False
     return hmac.compare_digest(pw.encode("utf-8"), stored.encode("utf-8")), True
 
 
@@ -243,43 +396,83 @@ def _dummy_hash():
 
 
 @st.cache_resource(show_spinner=False)
-def _login_state():
-    return {"lock": threading.Lock(), "attempts": {}}
+def _limiter():
+    return {"lock": threading.Lock(), "recs": {}}
 
 
-def _key(username):
-    return username.strip().lower()[:64]
+def _prune(recs, now):
+    for k in [k for k, v in recs.items() if v["until"] < now and now - v["last"] > STRIKE_DECAY]:
+        del recs[k]
+    if len(recs) > 5000:  # กันหน่วยความจำบวม: ทิ้งรายการเก่าสุดครึ่งหนึ่ง
+        for k, _ in sorted(recs.items(), key=lambda kv: kv[1]["last"])[: len(recs) // 2]:
+            del recs[k]
+
+
+def limit_remaining(keys):
+    """จำนวนวินาทีที่ยังถูกล็อก (0 = ไม่ถูกล็อก) — ดูทุก key แล้วเอาค่าสูงสุด"""
+    s = _limiter()
+    now = time.time()
+    with s["lock"]:
+        waits = [
+            int(s["recs"][k]["until"] - now) + 1
+            for k in keys
+            if k in s["recs"] and s["recs"][k]["until"] > now
+        ]
+    return max([0] + waits)
+
+
+def limit_hit(specs):
+    """บันทึกความผิดพลาด specs = [(key, max_fails, window_sec, lock_sec), ...]
+    ผิดครบ max_fails ภายใน window → ล็อก lock_sec (ล็อกซ้ำเร็ว ๆ จะนานขึ้นเป็นทวีคูณ สูงสุด 16 เท่า)"""
+    s = _limiter()
+    now = time.time()
+    with s["lock"]:
+        recs = s["recs"]
+        if len(recs) > 2000:
+            _prune(recs, now)
+        for key, max_fails, window, lock_sec in specs:
+            rec = recs.setdefault(key, {"count": 0, "first": now, "until": 0.0, "last": now, "strikes": 0})
+            if now - rec["last"] > STRIKE_DECAY:
+                rec["strikes"] = 0
+            if rec["count"] == 0 or now - rec["first"] > window:
+                rec["count"], rec["first"] = 0, now
+            rec["last"] = now
+            rec["count"] += 1
+            if rec["count"] >= max_fails:
+                rec["until"] = now + lock_sec * (2 ** min(rec["strikes"], 4))
+                rec["strikes"] += 1
+                rec["count"] = 0
+                logger.warning("Rate limit triggered: key=%s lock=%ss", key, int(rec["until"] - now))
+
+
+def limit_clear(keys):
+    s = _limiter()
+    with s["lock"]:
+        for k in keys:
+            s["recs"].pop(k, None)
+
+
+def _login_keys(username):
+    u, c = username.strip().lower()[:64], client_id()
+    # (ชื่อนี้จากเครื่องนี้, ชื่อนี้จากทุกเครื่อง, เครื่องนี้กับทุกชื่อ)
+    return f"login|{u}|{c}", f"login|{u}", f"login|*|{c}"
 
 
 def lock_remaining(username):
-    state = _login_state()
-    with state["lock"]:
-        rec = state["attempts"].get(_key(username))
-        return max(0, int(rec["until"] - time.time())) if rec else 0
+    return limit_remaining(_login_keys(username))
 
 
 def register_failure(username):
-    state = _login_state()
-    now = time.time()
-    with state["lock"]:
-        attempts = state["attempts"]
-        if len(attempts) > 2000:
-            for k in [k for k, v in attempts.items() if v["until"] < now and now - v["last"] > LOCK_SECONDS]:
-                del attempts[k]
-        rec = attempts.setdefault(_key(username), {"count": 0, "until": 0.0, "last": now})
-        if now - rec["last"] > LOCK_SECONDS:
-            rec["count"] = 0
-        rec["last"] = now
-        rec["count"] += 1
-        if rec["count"] >= MAX_FAILS:
-            rec["until"] = now + LOCK_SECONDS
-            rec["count"] = 0
+    k_user_client, k_user, k_client = _login_keys(username)
+    limit_hit([
+        (k_user_client, MAX_FAILS, LOCK_SECONDS, LOCK_SECONDS),
+        (k_user, MAX_FAILS_USER, 3600, LOCK_SECONDS),
+        (k_client, MAX_FAILS_CLIENT, 600, LOCK_SECONDS),
+    ])
 
 
 def clear_failures(username):
-    state = _login_state()
-    with state["lock"]:
-        state["attempts"].pop(_key(username), None)
+    limit_clear(_login_keys(username)[:1])
 
 
 # ==========================================
@@ -299,7 +492,7 @@ def read_users_fresh():
     return df[USER_COLS + ["_row"]]
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=USERS_TTL, show_spinner=False)
 def users_df_cached():
     return read_users_fresh()
 
@@ -318,8 +511,22 @@ def fresh_role(username):
     return None if row is None else row["Role"]
 
 
-def require_role(*roles):
-    role = fresh_role(st.session_state.username)
+def require_role(*roles, fresh=False):
+    """ตรวจสิทธิ์ — ถ้าเพิ่งตรวจผ่านภายใน ROLE_TTL วินาทีจะใช้ผลเดิม (ลดการเรียก API)
+    งานที่กระทบสิทธิ์/รหัสผ่านผู้ใช้ให้ส่ง fresh=True เพื่ออ่านสดทุกครั้ง"""
+    user = st.session_state.username
+    cached = st.session_state.get("_role_cache")
+    if (
+        not fresh
+        and cached
+        and cached[0] == user
+        and time.time() - cached[2] < ROLE_TTL
+        and cached[1] in roles
+    ):
+        return True
+
+    role = fresh_role(user)
+    st.session_state["_role_cache"] = (user, role, time.time())
     if role is None or role not in roles:
         if role is None:
             logout()
@@ -329,22 +536,44 @@ def require_role(*roles):
     return True
 
 
-def validate_new_password(pw):
+def validate_new_password(pw, username=""):
     if len(pw) < MIN_PW_LEN:
         return f"รหัสผ่านต้องมีอย่างน้อย {MIN_PW_LEN} ตัวอักษร"
     if len(pw) > MAX_PW_LEN:
         return f"รหัสผ่านต้องไม่เกิน {MAX_PW_LEN} ตัวอักษร"
+    low = pw.lower()
+    if low in COMMON_PASSWORDS or len(set(pw)) == 1:
+        return "รหัสผ่านเดาง่ายเกินไป กรุณาเลือกรหัสอื่น"
+    if username and low == username.strip().lower():
+        return "รหัสผ่านต้องไม่เหมือนชื่อผู้ใช้"
     return None
 
 
+def signup_enabled():
+    """เปิดให้สมัครเองได้ก็ต่อเมื่อมี signup_code หรือตั้ง allow_open_signup = true อย่างตั้งใจ"""
+    return bool(secret("signup_code")) or str(secret("allow_open_signup", "")).lower() in ("1", "true", "yes")
+
+
 def sign_up(username, password, invite_code=""):
+    if not signup_enabled():
+        return False, "ระบบปิดการลงทะเบียนด้วยตนเอง กรุณาติดต่อผู้ดูแลระบบ"
+
     uname = username.strip().lower()
+    invite_keys = [f"invite|{client_id()}", "invite|*"]
+    wait = limit_remaining(invite_keys + ["signup|*"])
+    if wait:
+        return False, f"มีการลงทะเบียน/ลองรหัสเชิญถี่เกินไป กรุณารอ {fmt_wait(wait)}"
+
     required_code = secret("signup_code")
     if required_code and not hmac.compare_digest(invite_code.strip().encode(), str(required_code).encode()):
+        limit_hit([
+            (invite_keys[0], MAX_FAILS, 600, LOCK_SECONDS),
+            (invite_keys[1], MAX_FAILS_CLIENT, 600, LOCK_SECONDS),
+        ])
         return False, "รหัสเชิญไม่ถูกต้อง"
     if not USERNAME_RE.match(uname):
         return False, "ชื่อผู้ใช้ต้องเป็น a-z, 0-9, _ . - ความยาว 3–32 ตัวอักษร"
-    err = validate_new_password(password)
+    err = validate_new_password(password, uname)
     if err:
         return False, err
 
@@ -354,6 +583,8 @@ def sign_up(username, password, invite_code=""):
             return False, "ชื่อผู้ใช้งานนี้มีคนใช้แล้ว กรุณาเลือกชื่ออื่น"
         _append_row(_users_ws(), [uname, hash_pw(password), "User"])
     clear_user_cache()
+    limit_hit([("signup|*", SIGNUP_MAX_PER_HOUR, 3600, 3600)])
+    audit("signup", uname, user=uname)
     return True, f"ลงทะเบียนสำเร็จ! คุณ {uname} ได้รับสิทธิ์ 'User'"
 
 
@@ -363,37 +594,50 @@ def _write_password(username, pw_plain):
         row = find_user(df, username)
         if row is None:
             return False
-        ws = _users_ws()
-        headers = [h.strip() for h in _row_values(ws, 1)]
-        _update_cell(ws, int(row["_row"]), headers.index("Password") + 1, hash_pw(pw_plain))
+        _update_cell(
+            _users_ws(), int(row["_row"]), users_headers().index("Password") + 1, hash_pw(pw_plain)
+        )
     clear_user_cache()
     return True
 
 
 def set_password_as_admin(target, new_pw):
-    if not require_role("Admin"):
+    if not require_role("Admin", fresh=True):
         return False, "ไม่มีสิทธิ์ดำเนินการ"
-    err = validate_new_password(new_pw)
+    err = validate_new_password(new_pw, target)
     if err:
         return False, err
     if not _write_password(target, new_pw):
         return False, "ไม่พบผู้ใช้นี้"
+    revoke_sessions(target)
+    audit("reset_password", target)
     return True, f"รีเซ็ตรหัสผ่านของ {target} แล้ว"
 
 
 def change_own_password(old_pw, new_pw):
-    row = find_user(read_users_fresh(), st.session_state.username)
+    user = st.session_state.username
+    key = f"chpw|{user.lower()}"
+    wait = limit_remaining([key])
+    if wait:
+        return False, f"ใส่รหัสเดิมผิดหลายครั้ง กรุณารอ {fmt_wait(wait)}"
+
+    row = find_user(read_users_fresh(), user)
     if row is None or not verify_pw(old_pw, row["Password"])[0]:
+        limit_hit([(key, MAX_FAILS, 600, LOCK_SECONDS)])
         return False, "รหัสผ่านเดิมไม่ถูกต้อง"
-    err = validate_new_password(new_pw)
+    err = validate_new_password(new_pw, user)
     if err:
         return False, err
-    _write_password(st.session_state.username, new_pw)
-    return True, "เปลี่ยนรหัสผ่านเรียบร้อย"
+    if not _write_password(user, new_pw):
+        return False, "ไม่พบผู้ใช้นี้"
+    limit_clear([key])
+    revoke_sessions(user)
+    audit("change_password", user)
+    return True, "เปลี่ยนรหัสผ่านเรียบร้อย (เครื่องอื่นที่ล็อกอินค้างอยู่จะถูกออกจากระบบ)"
 
 
 def update_user_role(target, new_role):
-    if not require_role("Admin"):
+    if not require_role("Admin", fresh=True):
         return False, "ไม่มีสิทธิ์ดำเนินการ"
     if new_role not in VALID_ROLES:
         return False, "สิทธิ์ไม่ถูกต้อง"
@@ -405,32 +649,33 @@ def update_user_role(target, new_role):
         admin_count = int((df["Role"] == "Admin").sum())
         if row["Role"] == "Admin" and new_role != "Admin" and admin_count <= 1:
             return False, "ต้องมีผู้ดูแลระบบ (Admin) อย่างน้อย 1 คนเสมอ"
-        ws = _users_ws()
-        headers = [h.strip() for h in _row_values(ws, 1)]
-        _update_cell(ws, int(row["_row"]), headers.index("Role") + 1, new_role)
+        _update_cell(
+            _users_ws(), int(row["_row"]), users_headers().index("Role") + 1, new_role
+        )
     clear_user_cache()
     if target.strip().lower() == st.session_state.username.lower():
         st.session_state.role = new_role
+        st.session_state.pop("_role_cache", None)
+    audit("change_role", f"{target} -> {new_role}")
     return True, "บันทึกสิทธิ์เรียบร้อย!"
 
 
 def migrate_plaintext_passwords():
-    if not require_role("Admin"):
+    if not require_role("Admin", fresh=True):
         return 0
     with get_write_lock():
         df = read_users_fresh()
         targets = df[(df["Password"] != "") & (~df["Password"].map(is_hashed))]
         if targets.empty:
             return 0
-        ws = _users_ws()
-        headers = [h.strip() for h in _row_values(ws, 1)]
-        pw_col = headers.index("Password") + 1
+        pw_col = users_headers().index("Password") + 1
         data = [
             {"range": rowcol_to_a1(int(r["_row"]), pw_col), "values": [[hash_pw(r["Password"])]]}
             for _, r in targets.iterrows()
         ]
-        _batch_update(ws, data)
+        _batch_update(_users_ws(), data)
     clear_user_cache()
+    audit("migrate_passwords", f"{len(targets)} accounts")
     return len(targets)
 
 
@@ -573,7 +818,7 @@ def apply_theme(theme_name):
 # ==========================================
 # 🔑 Login / Session
 # ==========================================
-SESSION_DEFAULTS = {"logged_in": False, "username": "", "role": "", "login_at": 0.0}
+SESSION_DEFAULTS = {"logged_in": False, "username": "", "role": "", "login_at": 0.0, "last_seen": 0.0}
 
 
 def init_session():
@@ -584,6 +829,7 @@ def init_session():
 def logout():
     for k, v in SESSION_DEFAULTS.items():
         st.session_state[k] = v
+    st.session_state.pop("_role_cache", None)
 
 
 def render_login():
@@ -593,6 +839,7 @@ def render_login():
     with col2:
         st.title("🔐 เข้าสู่ระบบ / ลงทะเบียน")
         require_code = bool(secret("signup_code"))
+        can_signup = signup_enabled()
 
         with st.form("login_form", clear_on_submit=False):
             username = st.text_input("ชื่อผู้ใช้งาน (Username)", max_chars=64).strip()
@@ -604,8 +851,13 @@ def render_login():
             c_login, c_signup = st.columns(2)
             with c_login:
                 submit_login = st.form_submit_button("เข้าสู่ระบบ (Login)", type="primary")
+            submit_signup = False
             with c_signup:
-                submit_signup = st.form_submit_button("ลงทะเบียน (Sign Up)")
+                if can_signup:
+                    submit_signup = st.form_submit_button("ลงทะเบียน (Sign Up)")
+
+        if not can_signup:
+            st.caption("ต้องการบัญชีใหม่? กรุณาติดต่อผู้ดูแลระบบ")
 
         if submit_login:
             handle_login(username, password)
@@ -630,9 +882,9 @@ def handle_login(username, password):
     row = find_user(users_df, username)
     if row is None:
         verify_pw(password, _dummy_hash())
-        ok, legacy = False, False
+        ok, upgrade = False, False
     else:
-        ok, legacy = verify_pw(password, row["Password"])
+        ok, upgrade = verify_pw(password, row["Password"])
 
     if not ok:
         register_failure(username)
@@ -640,28 +892,72 @@ def handle_login(username, password):
         return
 
     clear_failures(username)
-    if legacy:
+    if upgrade:
+        # รหัสผ่านเป็นข้อความธรรมดา หรือ hash แบบเก่า → อัปเกรดเป็นแบบใหม่
         try:
             _write_password(row["Username"], password)
         except Exception:
-            logger.exception("Could not upgrade legacy password hash")
+            logger.exception("Could not upgrade password hash")
 
     st.session_state.logged_in = True
     st.session_state.username = row["Username"]
     st.session_state.role = row["Role"]
     st.session_state.login_at = time.time()
+    st.session_state["_role_cache"] = (row["Username"], row["Role"], time.time())
+    st.session_state.last_seen = time.time()
+    audit("login", user=row["Username"])
     flash(f"ยินดีต้อนรับคุณ {row['Username']}", "🎉")
     st.rerun()
 
 
+@st.cache_resource(show_spinner=False)
+def _revoked():
+    return {}
+
+
+def revoke_sessions(username):
+    """ทำให้ session เดิมของผู้ใช้นี้ (ทุกเครื่อง) หมดอายุ — session ปัจจุบันของผู้ที่กดเองจะถูกต่ออายุ
+    (เก็บในหน่วยความจำของ process: รีสตาร์ทแอปแล้วรายการนี้จะหายไป)"""
+    _revoked()[username.strip().lower()] = time.time()
+    if username.strip().lower() == st.session_state.get("username", "").strip().lower():
+        st.session_state.login_at = time.time()
+
+
+def sync_session_user():
+    """ตรวจกับรายชื่อผู้ใช้ล่าสุด (แคช 60 วินาที): บัญชีถูกลบ → ออกจากระบบ, สิทธิ์เปลี่ยน → อัปเดตทันที"""
+    try:
+        row = find_user(users_df_cached(), st.session_state.username)
+    except Exception:
+        logger.exception("sync_session_user failed")
+        return  # Sheets มีปัญหา: คง session เดิมไว้ (การเขียนข้อมูลยังตรวจสิทธิ์เสมอ)
+    if row is None:
+        logout()
+        flash("บัญชีนี้ไม่มีอยู่ในระบบแล้ว", "⚠️")
+        st.rerun()
+    if row["Role"] != st.session_state.role:
+        st.session_state.role = row["Role"]
+        st.session_state.pop("_role_cache", None)
+
+
 def check_login():
     init_session()
+    ss = st.session_state
+    if ss.logged_in:
+        revoked_at = _revoked().get(ss.username.strip().lower(), 0.0)
+        if ss.login_at < revoked_at:
+            logout()
+            flash("รหัสผ่านของบัญชีนี้ถูกเปลี่ยน กรุณาเข้าสู่ระบบใหม่", "🔒")
+        elif ss.last_seen and time.time() - ss.last_seen > IDLE_MINUTES * 60:
+            logout()
+            flash("ไม่มีการใช้งานนาน ระบบออกจากระบบให้อัตโนมัติ", "⏱️")
     if st.session_state.logged_in and time.time() - st.session_state.login_at > SESSION_HOURS * 3600:
         logout()
         flash("หมดเวลาการใช้งาน กรุณาเข้าสู่ระบบอีกครั้ง", "⏱️")
     if not st.session_state.logged_in:
         render_login()
         st.stop()
+    st.session_state.last_seen = time.time()
+    sync_session_user()
 
 
 # ==========================================
@@ -678,26 +974,61 @@ def _load_data_raw():
     return df.reset_index(drop=True)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=DATA_TTL, show_spinner=False)
 def load_data_cached():
-    return _load_data_raw()
+    """โหลดข้อมูล + คำนวณคอลัมน์ช่วย (_prefix, _norm) + เรียงตามเลขรหัสแบบ natural ครั้งเดียวต่อรอบแคช"""
+    df = _load_data_raw()
+    keys = [natural_sort_key(v) for v in df['เลขรหัส']]
+    order = sorted(range(len(keys)), key=keys.__getitem__)
+    df = df.iloc[order].reset_index(drop=True)
+    df["_prefix"] = df['เลขรหัส'].map(extract_prefix)
+    df["_norm"] = df['เลขรหัส'].map(norm_id)
+    return df
+
+
+@st.cache_resource(show_spinner=False)
+def _last_good():
+    return {}
+
+
+def load_data_safe():
+    """โหลดข้อมูล ถ้า Google Sheets ล่ม/โควตาเต็ม ให้ใช้ชุดล่าสุดที่โหลดสำเร็จแทน"""
+    try:
+        df = load_data_cached()
+        _last_good()["df"] = df
+        return df
+    except Exception:
+        logger.exception("load_data failed")
+        stale = _last_good().get("df")
+        if stale is not None:
+            st.warning("⚠️ เชื่อมต่อ Google Sheets ไม่ได้ชั่วคราว กำลังแสดงข้อมูลล่าสุดที่โหลดไว้ (การบันทึกยังตรวจรหัสซ้ำกับข้อมูลสดเสมอ)")
+            return stale
+        raise
 
 
 def clear_all_caches():
     load_data_cached.clear()
     users_df_cached.clear()
+    data_headers.clear()
+    users_headers.clear()
 
 
 def append_record(row):
-    """บันทึกแถวใหม่: ตรวจสิทธิ์สด + ตรวจรหัสซ้ำกับข้อมูลสด + เรียงคอลัมน์ตามหัวตารางจริง"""
+    """บันทึกแถวใหม่: ตรวจสิทธิ์ + ตรวจรหัสซ้ำกับข้อมูลสด + เรียงคอลัมน์ตามหัวตาราง"""
     if not require_role("Admin", "Editor"):
         return False, "คุณไม่มีสิทธิ์บันทึกข้อมูล"
 
+    row = {k: clean_text(v) for k, v in row.items()}
+    bad = [k for k, v in row.items() if looks_like_formula(v)]
+    if bad:
+        return False, f"ห้ามขึ้นต้นข้อมูลด้วยเครื่องหมาย = + หรือ @ (ช่อง: {', '.join(bad)})"
+
     with get_write_lock():
         ws = _data_ws()
-        headers = [h.strip() for h in _row_values(ws, 1)]
+        headers = data_headers()
         missing = [c for c in DATA_COLS if c not in headers]
         if missing:
+            data_headers.clear()  # หัวตารางอาจเปลี่ยน ให้อ่านใหม่รอบหน้า
             return False, f"ชีตข้อมูลหลักขาดคอลัมน์: {', '.join(missing)}"
 
         existing = {norm_id(v) for v in _col_values(ws, headers.index('เลขรหัส') + 1)}
@@ -706,17 +1037,16 @@ def append_record(row):
 
         _append_row(ws, [row.get(h, "") for h in headers])
     load_data_cached.clear()
+    audit("add_record", row['เลขรหัส'])
     return True, "บันทึกข้อมูลสำเร็จ!"
 
 
 def get_last_id_in_category(df, prefix):
+    """df เรียงตามเลขรหัสไว้แล้ว และมีคอลัมน์ _prefix → แถวสุดท้ายของหมวดคือเลขล่าสุด"""
     if df.empty or not prefix:
         return "ยังไม่มีข้อมูล"
-    ids = df['เลขรหัส'].astype(str).str.strip()
-    in_category = ids[ids.map(extract_prefix) == prefix].tolist()
-    if not in_category:
-        return "ยังไม่มีข้อมูล"
-    return sorted(in_category, key=natural_sort_key)[-1]
+    ids = df.loc[df["_prefix"] == prefix, 'เลขรหัส']
+    return ids.iloc[-1] if not ids.empty else "ยังไม่มีข้อมูล"
 
 
 # ==========================================
@@ -792,7 +1122,7 @@ st.title("📂 ระบบทะเบียนคุมเลขรหัส�
 st.caption(f"ผู้ใช้งาน: {st.session_state.username} | สิทธิ์: {st.session_state.role}")
 
 with st.spinner("กำลังโหลดข้อมูล..."):
-    df = guard(load_data_cached)
+    df = guard(load_data_safe)
 
 # กำหนดแท็บตามสิทธิ์การใช้งาน
 if st.session_state.role == "User":
@@ -812,17 +1142,17 @@ with tab1:
     with c3:
         search_surname = st.text_input("นามสกุล", placeholder="พิมพ์นามสกุล...").strip()
 
-    results = df
-    if search_id:
-        results = results[results['เลขรหัส'].str.contains(search_id, na=False, case=False, regex=False)]
-    if search_name:
-        results = results[results['ชื่อ'].str.contains(search_name, na=False, case=False, regex=False)]
-    if search_surname:
-        results = results[results['นามสกุล'].str.contains(search_surname, na=False, case=False, regex=False)]
-
     if search_id or search_name or search_surname:
+        results = df
+        if search_id:
+            results = results[results['เลขรหัส'].str.contains(search_id, na=False, case=False, regex=False)]
+        if search_name:
+            results = results[results['ชื่อ'].str.contains(search_name, na=False, case=False, regex=False)]
+        if search_surname:
+            results = results[results['นามสกุล'].str.contains(search_surname, na=False, case=False, regex=False)]
+
         st.success(f"พบ {len(results)} รายการ")
-        show_df(results)
+        show_df(visible(results))
     else:
         st.info("พิมพ์รหัส, ชื่อ หรือนามสกุล เพื่อค้นหาข้อมูล")
 
@@ -857,8 +1187,8 @@ if tab2:
                     last = get_last_id_in_category(df, search_prefix)
                     st.info(f"📌 หมวด '{search_prefix}' ล่าสุดคือ: **{last}**")
 
-                # 2. ตรวจสอบรหัสซ้ำ
-                if norm_id(new_id_input) in {norm_id(v) for v in df['เลขรหัส'].values}:
+                # 2. ตรวจสอบรหัสซ้ำ (เทียบกับคอลัมน์ที่ normalize ไว้แล้ว)
+                if df["_norm"].eq(norm_id(new_id_input)).any():
                     st.error("❌ รหัสนี้ถูกใช้งานแล้ว!")
                     is_id_invalid = True
                 # 3. ตรวจสอบรูปแบบให้ครบ (ต้องมีตัวอักษร + จุด + ตัวเลข เช่น บ.123)
@@ -901,6 +1231,8 @@ if tab2:
 
                 if missing_fields:
                     st.error(f"❌ กรุณากรอกข้อมูลให้ครบทุกช่อง (ยังขาด: {', '.join(missing_fields)})")
+                elif any(looks_like_formula(v) for v in (new_name, new_surname, new_note)):
+                    st.error("❌ ห้ามขึ้นต้นข้อมูลด้วยเครื่องหมาย = + หรือ @")
                 elif not STRICT_ID_RE.match(new_id_input):
                     st.error("❌ เลขรหัสต้องมีทั้งตัวอักษร จุด และตัวเลขครบถ้วน (เช่น บ.123)")
                 elif is_id_invalid:
@@ -932,9 +1264,6 @@ if tab2:
 with tab3:
     st.write(f"ข้อมูลทั้งหมด **{len(df)}** รายการ")
     if not df.empty:
-        df_sorted = df.copy()
-        df_sorted['sort_key'] = df_sorted['เลขรหัส'].apply(natural_sort_key)
-        df_sorted = df_sorted.sort_values('sort_key').drop(columns=['sort_key'])
-        show_df(df_sorted)
+        show_df(visible(df))  # เรียงไว้แล้วตอนโหลด (อยู่ในแคช)
     else:
         st.info("ยังไม่มีข้อมูลในตาราง")
